@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CRDT Board</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="connection">
+        <h1>CRDT Board</h1>
+        <div class="status">
+          <span id="connection-status" class="status-dot status-dot--disconnected"></span>
+          <span id="connection-label">Disconnected</span>
+        </div>
+        <div class="controls">
+          <label>
+            Server URL
+            <input id="server-url" type="text" value="ws://localhost:3000/ws" />
+          </label>
+          <label>
+            Username (optional)
+            <input id="username" type="text" placeholder="e.g. alice" />
+          </label>
+          <button id="connect-btn" type="button">Connect</button>
+          <button id="disconnect-btn" type="button" disabled>Disconnect</button>
+        </div>
+        <div class="current-user" id="current-user"></div>
+        <div class="messages" id="messages"></div>
+      </section>
+
+      <section class="composer">
+        <h2>Create Post</h2>
+        <form id="composer-form">
+          <textarea
+            id="post-text"
+            placeholder="Share an update…"
+            maxlength="2000"
+            required
+          ></textarea>
+          <div class="composer-controls">
+            <label>
+              Visibility
+              <select id="visibility">
+                <option value="public" selected>Public</option>
+                <option value="private">Private</option>
+              </select>
+            </label>
+            <button type="submit">Publish</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="feed">
+        <h2>Latest Posts</h2>
+        <div id="posts"></div>
+      </section>
+    </main>
+
+    <template id="post-template">
+      <article class="post">
+        <header class="post__meta">
+          <span class="post__author"></span>
+          <span class="post__timestamp"></span>
+          <span class="post__visibility"></span>
+        </header>
+        <p class="post__text"></p>
+        <footer class="post__actions">
+          <button class="btn-like" type="button"></button>
+          <span class="likes"></span>
+          <button class="btn-edit" type="button">Edit</button>
+          <button class="btn-delete" type="button">Delete</button>
+        </footer>
+      </article>
+    </template>
+
+    <dialog id="edit-dialog">
+      <form method="dialog" id="edit-form">
+        <h3>Edit Post</h3>
+        <textarea id="edit-text" maxlength="2000" required></textarea>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="submit" class="primary">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
