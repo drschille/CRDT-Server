@@ -244,6 +244,26 @@ function createPostView() {
   };
 }
 
+function transformSelection(oldStart, oldEnd, delta) {
+  const insertLen = delta.insertText.length;
+  const deleteLen = delta.deleteCount;
+  const net = insertLen - deleteLen;
+  const spanStart = delta.index;
+  const spanEndOld = delta.index + deleteLen; // end index (exclusive) of replaced segment in old text
+
+  // Entirely before span
+  if (oldEnd <= spanStart) {
+    return [oldStart, oldEnd];
+  }
+  // Entirely after span
+  if (oldStart >= spanEndOld) {
+    return [oldStart + net, oldEnd + net];
+  }
+  // Overlaps span → collapse to end of inserted text
+  const newPos = spanStart + insertLen;
+  return [newPos, newPos];
+}
+
 function updatePostView(view, post) {
   view.element.dataset.postId = post.id;
   view.authorEl.textContent = `@${post.authorId}`;
@@ -262,41 +282,45 @@ function updatePostView(view, post) {
 
   const previousValue = view.editorEl.value;
   if (previousValue !== post.text) {
-    const isFocused = document.activeElement === view.editorEl;
-    const prevSelectionStart = view.editorEl.selectionStart ?? previousValue.length;
-    const prevSelectionEnd = view.editorEl.selectionEnd ?? previousValue.length;
-    const prevScrollTop = view.editorEl.scrollTop;
-    const prevScrollLeft = view.editorEl.scrollLeft;
-
-    view.editorEl.value = post.text;
-
-    if (isFocused) {
-      let nextSelectionStart = prevSelectionStart;
-      let nextSelectionEnd = prevSelectionEnd;
-      const delta = computeDelta(previousValue, post.text);
-      if (delta) {
-        const changeEnd = delta.index + delta.deleteCount;
-        const deltaLength = delta.insertText.length - delta.deleteCount;
-
-        const adjustPosition = (pos) => {
-          if (pos < delta.index) {
-            return pos;
+    const delta = computeDelta(previousValue, post.text);
+    if (delta && typeof view.editorEl.setRangeText === 'function') {
+      const { index, deleteCount, insertText } = delta;
+      const wasFocused = document.activeElement === view.editorEl;
+      const oldStart = wasFocused ? (view.editorEl.selectionStart ?? 0) : 0;
+      const oldEnd = wasFocused ? (view.editorEl.selectionEnd ?? oldStart) : 0;
+      const prevScrollTop = view.editorEl.scrollTop;
+      const prevScrollLeft = view.editorEl.scrollLeft;
+      view.editorEl.setRangeText(insertText, index, index + deleteCount, 'end');
+      if (wasFocused) {
+        view.editorEl.scrollTop = prevScrollTop;
+        view.editorEl.scrollLeft = prevScrollLeft;
+        try {
+          let nextStart = oldStart;
+          let nextEnd = oldEnd;
+          // Transform only if selection not strictly before change span
+          if (!(oldEnd <= index)) {
+            [nextStart, nextEnd] = transformSelection(oldStart, oldEnd, delta);
           }
-          if (pos <= changeEnd) {
-            return delta.index + delta.insertText.length;
-          }
-          return pos + deltaLength;
-        };
-
-        nextSelectionStart = adjustPosition(nextSelectionStart);
-        nextSelectionEnd = adjustPosition(nextSelectionEnd);
+          const len = view.editorEl.value.length;
+          // Ensure element focused before setting selection (some browsers ignore selection change otherwise)
+          view.editorEl.focus();
+          // Defer selection application to next frame to avoid race with value mutation
+          requestAnimationFrame(() => {
+            view.editorEl.setSelectionRange(
+              clamp(nextStart, 0, len),
+              clamp(nextEnd, 0, len)
+            );
+          });
+        } catch (_) {
+          // Silent: caret will be at end per 'end' behavior if transform fails.
+        }
       }
+    } else {
+      view.editorEl.value = post.text;
+    }
 
-      nextSelectionStart = clamp(nextSelectionStart, 0, view.editorEl.value.length);
-      nextSelectionEnd = clamp(nextSelectionEnd, 0, view.editorEl.value.length);
-      view.editorEl.setSelectionRange(nextSelectionStart, nextSelectionEnd);
-      view.editorEl.scrollTop = prevScrollTop;
-      view.editorEl.scrollLeft = prevScrollLeft;
+    if (view.editorEl.value !== post.text) {
+      view.editorEl.value = post.text;
     }
   }
 
@@ -473,8 +497,8 @@ function buildStatusMessage(post, canEdit) {
     canEdit && post.visibility === 'public'
       ? 'Live editable by everyone'
       : canEdit
-      ? 'Live editable by you'
-      : 'Read only';
+        ? 'Live editable by you'
+        : 'Read only';
   const editedLabel = post.editedAt ? `Edited by ${editor}` : `Created by ${editor}`;
   return `${access} — ${editedLabel}`;
 }
