@@ -1,0 +1,34 @@
+{
+  "name": "crdt-server",
+  "version": "0.1.0",
+  "description": "Centralized CRDT bulletin board server",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "lint": "eslint \"src/**/*.ts\"",
+    "format": "prettier --write .",
+    "test": "vitest"
+  },
+  "keywords": [],
+  "license": "MIT",
+  "dependencies": {
+    "@automerge/automerge": "^2.1.1",
+    "express": "^4.18.2",
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.8.10",
+    "@types/ws": "^8.5.8",
+    "@typescript-eslint/eslint-plugin": "^6.9.0",
+    "@typescript-eslint/parser": "^6.9.0",
+    "eslint": "^8.53.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.0.3",
+    "tsx": "^4.1.1",
+    "typescript": "^5.2.2",
+    "vitest": "^0.34.6"
+  }
+}
