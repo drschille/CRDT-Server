@@ -35,7 +35,7 @@ function migrateLegacyPosts(doc: Automerge.Doc<BoardDoc>): Automerge.Doc<BoardDo
         post.text = createText(raw);
       }
       if (!post.lastEditedBy) {
-        post.lastEditedBy = post.editedAt ? post.authorId : post.authorId;
+        post.lastEditedBy = post.authorId;
       }
     }
   });
