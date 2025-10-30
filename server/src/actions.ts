@@ -23,7 +23,6 @@ export function addPost(
       authorId: userId,
       text,
       createdAt: new Date().toISOString(),
-      editedAt: undefined,
       likes: {},
       visibility
     });

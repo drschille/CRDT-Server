@@ -1,5 +1,5 @@
 import type { Server as HTTPServer } from 'node:http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import * as Automerge from '@automerge/automerge';
 import { filterForUser } from './filter.js';
 import { addPost, deletePost, editPost, likePost, unlikePost } from './actions.js';
@@ -39,27 +39,34 @@ export function createWSServer(server: HTTPServer, docRef: DocRef): WebSocketSer
     sendJson(socket, { type: 'welcome', userId });
     sendSnapshot(socket, docRef.doc, userId);
 
-    socket.on('message', async (raw) => {
-      try {
-        const message = parseMessage(raw.toString());
-        if (message.type === 'hello') {
-          info('client hello', { userId, version: message.clientVersion });
-          return;
-        }
+    socket.on('message', (raw) => {
+      void (async () => {
+        try {
+          const message = parseMessage(raw);
+          if (message.type === 'hello') {
+            info('client hello', { userId, version: message.clientVersion });
+            return;
+          }
 
-        const didChange = await handleDomainMessage(message, userId, docRef, socket);
-        if (didChange) {
-          await saveDoc(docRef.doc);
-          broadcastSnapshots(connections, docRef.doc);
+          if (message.type === 'request_full_state') {
+            sendSnapshot(socket, docRef.doc, userId);
+            return;
+          }
+
+          const didChange = handleDomainMessage(message, userId, docRef);
+          if (didChange) {
+            await saveDoc(docRef.doc);
+            broadcastSnapshots(connections, docRef.doc);
+          }
+        } catch (error: unknown) {
+          warn('failed to handle message', { error, userId });
+          sendJson(socket, {
+            type: 'error',
+            code: 'BAD_REQUEST',
+            message: error instanceof Error ? error.message : 'Invalid message'
+          });
         }
-      } catch (error: unknown) {
-        warn('failed to handle message', { error, userId });
-        sendJson(socket, {
-          type: 'error',
-          code: 'BAD_REQUEST',
-          message: error instanceof Error ? error.message : 'Invalid message'
-        });
-      }
+      })();
     });
 
     socket.on('close', () => {
@@ -71,20 +78,20 @@ export function createWSServer(server: HTTPServer, docRef: DocRef): WebSocketSer
   return wss;
 }
 
-function parseMessage(raw: string): ClientMessage {
-  const parsed = JSON.parse(raw) as ClientMessage;
+function parseMessage(raw: RawData): ClientMessage {
+  const text = rawDataToString(raw);
+  const parsed = JSON.parse(text) as ClientMessage;
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('Invalid payload');
   }
   return parsed;
 }
 
-async function handleDomainMessage(
+function handleDomainMessage(
   message: ClientMessage,
   userId: UserId,
-  docRef: DocRef,
-  socket: WebSocket
-): Promise<boolean> {
+  docRef: DocRef
+): boolean {
   switch (message.type) {
     case 'add_post':
       docRef.doc = addPost(
@@ -106,12 +113,22 @@ async function handleDomainMessage(
     case 'unlike_post':
       docRef.doc = unlikePost(docRef.doc, userId, message.id);
       return true;
-    case 'request_full_state':
-      sendSnapshot(socket, docRef.doc, userId);
-      return false;
     default:
       throw new Error(`Unsupported message type ${(message as { type: string }).type}`);
   }
+}
+
+function rawDataToString(raw: RawData): string {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (Array.isArray(raw)) {
+    return Buffer.concat(raw).toString('utf8');
+  }
+  if (raw instanceof ArrayBuffer) {
+    return Buffer.from(raw).toString('utf8');
+  }
+  return raw.toString('utf8');
 }
 
 function broadcastSnapshots(connections: Set<Connection>, doc: Automerge.Doc<BoardDoc>): void {
