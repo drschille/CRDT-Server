@@ -18,3 +18,14 @@ Key scripts (see `package.json`):
 - `pnpm build` – emit compiled JavaScript to `dist/`.
 - `pnpm test` – execute Vitest test suite.
 - `pnpm lint` – run ESLint with TypeScript rules.
+
+## Web Frontend
+
+A lightweight dashboard lives in `web/` for sending actions and viewing live snapshots.
+
+1. Start the CRDT server (`pnpm dev` from `server/`).
+2. Serve the static assets, e.g.
+   ```bash
+   python -m http.server 4173 --directory web
+   ```
+3. Open http://localhost:4173 and press **Connect** (default URL targets `ws://localhost:3000/ws`).
