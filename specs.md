@@ -132,8 +132,8 @@ type ServerMsg =
    * Run a single `Automerge.change(doc, ...)` that applies the domain action:
 
    * `add_post`: push new `Post` with server UUID, timestamps, empty likes map.
-   * `edit_post`: update `text`, `editedAt` (authors or, for public posts, any user).
-   * `edit_post_live`: apply `{ index, deleteCount, text }` deltas to the Automerge.Text so multiple users can co-edit in real time.
+   * `edit_post`: update `text`, `editedAt`, and `lastEditedBy` (authors or, for public posts, any user).
+   * `edit_post_live`: apply `{ index, deleteCount, text }` deltas to the Automerge.Text so multiple users can co-edit in real time and stamp `lastEditedBy`.
    * `delete_post`: only author can delete; remove from array.
    * `like_post` / `unlike_post`: toggle `likes[userId]`.
    * Persist: `writeFileAtomic('data/board.bin', Automerge.save(doc))`.
@@ -149,8 +149,14 @@ type ServerMsg =
       posts: doc.posts
         .filter(p => p.visibility === 'public' || p.authorId === userId)
         .map(p => ({
-          ...p,
-          text: p.text.toString()
+          id: p.id,
+          authorId: p.authorId,
+          text: p.text.toString(),
+          createdAt: p.createdAt,
+          editedAt: p.editedAt,
+          lastEditedBy: p.lastEditedBy,
+          likes: p.likes,
+          visibility: p.visibility
         }))
     };
   }

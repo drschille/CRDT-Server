@@ -51,6 +51,7 @@ export function addPost(
       authorId: userId,
       text: createText(text),
       createdAt: new Date().toISOString(),
+      lastEditedBy: userId,
       likes: {},
       visibility
     });
@@ -72,6 +73,7 @@ export function editPost(
     assertCanEdit(post, userId);
     replaceText(post.text, text);
     post.editedAt = new Date().toISOString();
+    post.lastEditedBy = userId;
   });
 }
 
@@ -106,6 +108,7 @@ export function applyLiveEdit(
     }
 
     post.editedAt = new Date().toISOString();
+    post.lastEditedBy = userId;
   });
 }
 

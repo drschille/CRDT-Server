@@ -11,6 +11,7 @@ export interface Post {
   text: Text;
   createdAt: string;
   editedAt?: string;
+  lastEditedBy?: UserId;
   likes: Record<UserId, true>;
   visibility: Visibility;
 }
@@ -25,6 +26,7 @@ export interface FilteredPost {
   text: string;
   createdAt: string;
   editedAt?: string;
+  lastEditedBy?: UserId;
   likes: Record<UserId, true>;
   visibility: Visibility;
 }

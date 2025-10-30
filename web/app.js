@@ -172,10 +172,13 @@ function handleSnapshot(posts) {
 }
 
 function renderPosts(posts) {
+  const focusState = captureActiveEditorState();
+
   if (posts.length === 0) {
     postViews.forEach((view) => view.element.remove());
     postViews.clear();
     postsContainer.replaceChildren(emptyStateEl);
+    restoreFocus(focusState);
     return;
   }
 
@@ -208,6 +211,8 @@ function renderPosts(posts) {
       postViews.delete(postId);
     }
   }
+
+  restoreFocus(focusState);
 }
 
 function createPostView() {
@@ -283,11 +288,7 @@ function updatePostView(view, post) {
   view.deleteBtn.dataset.postId = post.id;
   view.deleteBtn.classList.toggle('hidden', !canDelete);
 
-  view.statusEl.textContent = canEdit
-    ? post.visibility === 'public'
-      ? 'Live editable by everyone'
-      : 'Live editable by you'
-    : 'Read only';
+  view.statusEl.textContent = buildStatusMessage(post, canEdit);
 }
 
 function onLikeClick(event) {
@@ -409,11 +410,12 @@ function updateLocalPostText(postId, text) {
   const post = postById.get(postId);
   if (post) {
     post.text = text;
+    post.lastEditedBy = currentUserId ?? post.lastEditedBy;
   }
 
   const index = latestPosts.findIndex((p) => p.id === postId);
   if (index !== -1) {
-    latestPosts[index] = { ...latestPosts[index], text };
+    latestPosts[index] = { ...latestPosts[index], text, lastEditedBy: currentUserId ?? latestPosts[index].lastEditedBy };
   }
 }
 
@@ -429,9 +431,64 @@ function formatTimestamp(post) {
   const date = new Date(base);
   const label = date.toLocaleString();
   if (post.editedAt) {
-    return `${label} (edited)`;
+    const editor = formatUserId(post.lastEditedBy ?? post.authorId);
+    return `${label} (edited by ${editor})`;
   }
-  return label;
+  return `${label} (created by ${formatUserId(post.authorId)})`;
+}
+
+function formatUserId(userId) {
+  if (!userId) {
+    return 'unknown';
+  }
+  return userId;
+}
+
+function buildStatusMessage(post, canEdit) {
+  const editor = formatUserId(post.lastEditedBy ?? post.authorId);
+  const access =
+    canEdit && post.visibility === 'public'
+      ? 'Live editable by everyone'
+      : canEdit
+      ? 'Live editable by you'
+      : 'Read only';
+  const editedLabel = post.editedAt ? `Edited by ${editor}` : `Created by ${editor}`;
+  return `${access} — ${editedLabel}`;
+}
+
+function captureActiveEditorState() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+  const postId = active.dataset.postId;
+  if (!postId || active.dataset.canEdit !== 'true') {
+    return null;
+  }
+  return {
+    postId,
+    selectionStart: active.selectionStart ?? active.value.length,
+    selectionEnd: active.selectionEnd ?? active.value.length
+  };
+}
+
+function restoreFocus(state) {
+  if (!state) {
+    return;
+  }
+  const view = postViews.get(state.postId);
+  if (!view) {
+    return;
+  }
+  const editor = view.editorEl;
+  if (editor.dataset.canEdit !== 'true') {
+    return;
+  }
+  const length = editor.value.length;
+  const start = clamp(state.selectionStart, 0, length);
+  const end = clamp(state.selectionEnd, 0, length);
+  editor.focus();
+  editor.setSelectionRange(start, end);
 }
 
 connectBtn.addEventListener('click', connect);

@@ -17,6 +17,7 @@ function toFilteredPost(post: BoardDoc['posts'][number]): FilteredPost {
     text: post.text.toString(),
     createdAt: post.createdAt,
     editedAt: post.editedAt,
+    lastEditedBy: post.lastEditedBy,
     likes: post.likes,
     visibility: post.visibility
   };

@@ -24,7 +24,7 @@ export async function saveDoc(doc: Automerge.Doc<BoardDoc>): Promise<void> {
 
 function migrateLegacyPosts(doc: Automerge.Doc<BoardDoc>): Automerge.Doc<BoardDoc> {
   const needsMigration = doc.posts.some((post) => typeof (post.text as unknown) === 'string');
-  if (!needsMigration) {
+  if (!needsMigration && doc.posts.every((post) => post.lastEditedBy)) {
     return doc;
   }
 
@@ -33,6 +33,9 @@ function migrateLegacyPosts(doc: Automerge.Doc<BoardDoc>): Automerge.Doc<BoardDo
       const raw = post.text as unknown;
       if (typeof raw === 'string') {
         post.text = createText(raw);
+      }
+      if (!post.lastEditedBy) {
+        post.lastEditedBy = post.editedAt ? post.authorId : post.authorId;
       }
     }
   });
