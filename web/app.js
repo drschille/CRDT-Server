@@ -186,24 +186,25 @@ function renderPosts(posts) {
     postsContainer.removeChild(emptyStateEl);
   }
 
-  const sorted = [...posts].sort((a, b) => {
-    const aDate = Date.parse(a.editedAt ?? a.createdAt ?? 0);
-    const bDate = Date.parse(b.editedAt ?? b.createdAt ?? 0);
-    return bDate - aDate;
-  });
+  const sorted = [...posts].sort(
+    (a, b) => Date.parse(b.createdAt ?? 0) - Date.parse(a.createdAt ?? 0)
+  );
 
   const seen = new Set();
 
-  for (const post of sorted) {
+  sorted.forEach((post, index) => {
     let view = postViews.get(post.id);
     if (!view) {
       view = createPostView();
       postViews.set(post.id, view);
     }
     updatePostView(view, post);
-    postsContainer.appendChild(view.element);
+    const currentNode = postsContainer.children[index] ?? null;
+    if (currentNode !== view.element) {
+      postsContainer.insertBefore(view.element, currentNode);
+    }
     seen.add(post.id);
-  }
+  });
 
   for (const [postId, view] of postViews.entries()) {
     if (!seen.has(postId)) {
@@ -262,18 +263,40 @@ function updatePostView(view, post) {
   const previousValue = view.editorEl.value;
   if (previousValue !== post.text) {
     const isFocused = document.activeElement === view.editorEl;
-    let selectionStart = view.editorEl.selectionStart ?? post.text.length;
-    let selectionEnd = view.editorEl.selectionEnd ?? post.text.length;
-    const previousLength = previousValue.length;
+    const prevSelectionStart = view.editorEl.selectionStart ?? previousValue.length;
+    const prevSelectionEnd = view.editorEl.selectionEnd ?? previousValue.length;
+    const prevScrollTop = view.editorEl.scrollTop;
+    const prevScrollLeft = view.editorEl.scrollLeft;
 
     view.editorEl.value = post.text;
 
     if (isFocused) {
-      const lengthDelta = post.text.length - previousLength;
-      selectionStart = clamp(selectionStart + lengthDelta, 0, post.text.length);
-      selectionEnd = clamp(selectionEnd + lengthDelta, 0, post.text.length);
-      view.editorEl.setSelectionRange(selectionStart, selectionEnd);
-      view.editorEl.focus();
+      let nextSelectionStart = prevSelectionStart;
+      let nextSelectionEnd = prevSelectionEnd;
+      const delta = computeDelta(previousValue, post.text);
+      if (delta) {
+        const changeEnd = delta.index + delta.deleteCount;
+        const deltaLength = delta.insertText.length - delta.deleteCount;
+
+        const adjustPosition = (pos) => {
+          if (pos < delta.index) {
+            return pos;
+          }
+          if (pos <= changeEnd) {
+            return delta.index + delta.insertText.length;
+          }
+          return pos + deltaLength;
+        };
+
+        nextSelectionStart = adjustPosition(nextSelectionStart);
+        nextSelectionEnd = adjustPosition(nextSelectionEnd);
+      }
+
+      nextSelectionStart = clamp(nextSelectionStart, 0, view.editorEl.value.length);
+      nextSelectionEnd = clamp(nextSelectionEnd, 0, view.editorEl.value.length);
+      view.editorEl.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+      view.editorEl.scrollTop = prevScrollTop;
+      view.editorEl.scrollLeft = prevScrollLeft;
     }
   }
 
