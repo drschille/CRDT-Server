@@ -39,12 +39,27 @@ type Visibility = 'public' | 'private';
 interface Post {
   id: PostId;
   authorId: UserId;
-  text: string;
-  createdAt: string;  // ISO8601
-  editedAt?: string;  // ISO8601
+  text: Automerge.Text;        // canonical doc stores CRDT text
+  createdAt: string;           // ISO8601
+  editedAt?: string;           // ISO8601
   likes: Record<UserId, true>; // set-as-map
   visibility: Visibility;
 }
+
+// Snapshots expose a plain string for client convenience:
+interface FilteredPost {
+  id: PostId;
+  authorId: UserId;
+  text: string;
+  createdAt: string;
+  editedAt?: string;
+  likes: Record<UserId, true>;
+  visibility: Visibility;
+}
+
+// Privacy/editing rules:
+// - `public` posts can be edited live by any connected user.
+// - `private` posts remain visible and editable only to their author.
 
 interface BoardDoc {
   posts: Post[];
@@ -70,6 +85,7 @@ type ClientMsg =
   | { type: 'hello'; clientVersion: string }
   | { type: 'add_post'; text: string; visibility?: Visibility }
   | { type: 'edit_post'; id: PostId; text: string }
+  | { type: 'edit_post_live'; id: PostId; index: number; deleteCount: number; text: string }
   | { type: 'delete_post'; id: PostId }
   | { type: 'like_post'; id: PostId }
   | { type: 'unlike_post'; id: PostId }
@@ -115,10 +131,11 @@ type ServerMsg =
    * Validate payload (type, required fields, string length).
    * Run a single `Automerge.change(doc, ...)` that applies the domain action:
 
-     * `add_post`: push new `Post` with server UUID, timestamps, empty likes map.
-     * `edit_post`: only author can edit; update `text`, `editedAt`.
-     * `delete_post`: only author can delete; remove from array.
-     * `like_post` / `unlike_post`: toggle `likes[userId]`.
+   * `add_post`: push new `Post` with server UUID, timestamps, empty likes map.
+   * `edit_post`: update `text`, `editedAt` (authors or, for public posts, any user).
+   * `edit_post_live`: apply `{ index, deleteCount, text }` deltas to the Automerge.Text so multiple users can co-edit in real time.
+   * `delete_post`: only author can delete; remove from array.
+   * `like_post` / `unlike_post`: toggle `likes[userId]`.
    * Persist: `writeFileAtomic('data/board.bin', Automerge.save(doc))`.
    * Broadcast to **all clients** their **personalized snapshot**:
 
@@ -126,13 +143,18 @@ type ServerMsg =
 
 4. **Filtering (privacy)**
 
-   ```ts
-   function filter(doc: BoardDoc, userId: UserId): BoardDoc {
-     return {
-       posts: doc.posts.filter(p => p.visibility === 'public' || p.authorId === userId)
-     };
-   }
-   ```
+  ```ts
+  function filter(doc: BoardDoc, userId: UserId): FilteredBoard {
+    return {
+      posts: doc.posts
+        .filter(p => p.visibility === 'public' || p.authorId === userId)
+        .map(p => ({
+          ...p,
+          text: p.text.toString()
+        }))
+    };
+  }
+  ```
 
 5. **Validation & Limits**
 
@@ -368,5 +390,3 @@ export function createWSServer(server: import('http').Server, docRef: { doc: Aut
 * No multi-document support.
 
 ---
-
-

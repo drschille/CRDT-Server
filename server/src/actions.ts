@@ -10,6 +10,34 @@ function requireNonEmptyText(text: string): string {
   return trimmed;
 }
 
+function createText(initial: string): Automerge.Text {
+  const text = new Automerge.Text();
+  if (initial.length > 0) {
+    text.insertAt(0, ...initial);
+  }
+  return text;
+}
+
+function replaceText(target: Automerge.Text, next: string): void {
+  if (target.length > 0) {
+    for (let i = target.length - 1; i >= 0; i -= 1) {
+      target.deleteAt(i);
+    }
+  }
+  if (next.length > 0) {
+    target.insertAt(0, ...next);
+  }
+}
+
+function assertCanEdit(post: BoardDoc['posts'][number], userId: UserId): void {
+  if (post.visibility === 'public') {
+    return;
+  }
+  if (post.authorId !== userId) {
+    throw new Error('Forbidden');
+  }
+}
+
 export function addPost(
   doc: Automerge.Doc<BoardDoc>,
   userId: UserId,
@@ -21,7 +49,7 @@ export function addPost(
     draft.posts.push({
       id: randomUUID(),
       authorId: userId,
-      text,
+      text: createText(text),
       createdAt: new Date().toISOString(),
       likes: {},
       visibility
@@ -41,10 +69,42 @@ export function editPost(
     if (!post) {
       throw new Error('Post not found');
     }
-    if (post.authorId !== userId) {
-      throw new Error('Forbidden');
+    assertCanEdit(post, userId);
+    replaceText(post.text, text);
+    post.editedAt = new Date().toISOString();
+  });
+}
+
+export function applyLiveEdit(
+  doc: Automerge.Doc<BoardDoc>,
+  userId: UserId,
+  postId: PostId,
+  index: number,
+  deleteCount: number,
+  insertText: string
+): Automerge.Doc<BoardDoc> {
+  if (index < 0 || deleteCount < 0) {
+    throw new Error('Invalid range');
+  }
+
+  return Automerge.change(doc, 'edit_post_live', (draft) => {
+    const post = draft.posts.find((p) => p.id === postId);
+    if (!post) {
+      throw new Error('Post not found');
     }
-    post.text = text;
+    assertCanEdit(post, userId);
+
+    const text = post.text;
+    const boundedIndex = Math.min(index, text.length);
+    const boundedDelete = Math.min(deleteCount, text.length - boundedIndex);
+
+    for (let i = 0; i < boundedDelete; i += 1) {
+      text.deleteAt(boundedIndex);
+    }
+    if (insertText.length > 0) {
+      text.insertAt(boundedIndex, ...insertText);
+    }
+
     post.editedAt = new Date().toISOString();
   });
 }
