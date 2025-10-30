@@ -3,6 +3,7 @@ const connectionLabelEl = document.querySelector('#connection-label');
 const connectBtn = document.querySelector('#connect-btn');
 const disconnectBtn = document.querySelector('#disconnect-btn');
 const serverUrlInput = document.querySelector('#server-url');
+const usernameInput = document.querySelector('#username');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
 const postsContainer = document.querySelector('#posts');
@@ -48,12 +49,35 @@ function connect() {
     return;
   }
 
+  const usernameRaw = usernameInput.value.trim();
+  const username = usernameRaw.toLowerCase();
+  if (username && !/^[a-z0-9_-]{1,32}$/.test(username)) {
+    showMessage('Username may include letters, numbers, underscores, and dashes (max 32 chars)', true);
+    return;
+  }
+  usernameInput.value = username;
+
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.close();
   }
 
-  showMessage(`Connecting to ${url}…`);
-  socket = new WebSocket(url);
+  let connectUrl;
+  try {
+    const parsed = new URL(url);
+    if (username) {
+      parsed.searchParams.set('username', username);
+    } else {
+      parsed.searchParams.delete('username');
+    }
+    connectUrl = parsed.toString();
+  } catch (error) {
+    console.error('Invalid server URL', error);
+    showMessage('Invalid server URL', true);
+    return;
+  }
+
+  showMessage(`Connecting to ${connectUrl}…`);
+  socket = new WebSocket(connectUrl);
 
   socket.addEventListener('open', () => {
     setConnectedState(true);

@@ -28,4 +28,4 @@ A lightweight dashboard lives in `web/` for sending actions and viewing live sna
    ```bash
    python -m http.server 4173 --directory web
    ```
-3. Open http://localhost:4173 and press **Connect** (default URL targets `ws://localhost:3000/ws`).
+3. Open http://localhost:4173, optionally enter a username to reuse an identity, and press **Connect** (default URL targets `ws://localhost:3000/ws`).
