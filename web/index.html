@@ -65,26 +65,15 @@
           <span class="post__timestamp"></span>
           <span class="post__visibility"></span>
         </header>
-        <p class="post__text"></p>
+        <textarea class="post__editor" spellcheck="false"></textarea>
         <footer class="post__actions">
           <button class="btn-like" type="button"></button>
           <span class="likes"></span>
-          <button class="btn-edit" type="button">Edit</button>
           <button class="btn-delete" type="button">Delete</button>
+          <span class="post__status"></span>
         </footer>
       </article>
     </template>
-
-    <dialog id="edit-dialog">
-      <form method="dialog" id="edit-form">
-        <h3>Edit Post</h3>
-        <textarea id="edit-text" maxlength="2000" required></textarea>
-        <menu>
-          <button value="cancel">Cancel</button>
-          <button value="submit" class="primary">Save</button>
-        </menu>
-      </form>
-    </dialog>
 
     <script type="module" src="./app.js"></script>
   </body>

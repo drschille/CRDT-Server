@@ -2,7 +2,7 @@ import type { Server as HTTPServer } from 'node:http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import * as Automerge from '@automerge/automerge';
 import { filterForUser } from './filter.js';
-import { addPost, deletePost, editPost, likePost, unlikePost } from './actions.js';
+import { addPost, applyLiveEdit, deletePost, editPost, likePost, unlikePost } from './actions.js';
 import { resolveUserId } from './auth.js';
 import { saveDoc } from './crdt.js';
 import { info, warn } from './logger.js';
@@ -21,6 +21,7 @@ type ClientMessage =
   | { type: 'hello'; clientVersion: string }
   | { type: 'add_post'; text: string; visibility?: 'public' | 'private' }
   | { type: 'edit_post'; id: string; text: string }
+  | { type: 'edit_post_live'; id: string; index: number; deleteCount: number; text: string }
   | { type: 'delete_post'; id: string }
   | { type: 'like_post'; id: string }
   | { type: 'unlike_post'; id: string }
@@ -87,6 +88,14 @@ function parseMessage(raw: RawData): ClientMessage {
   return parsed;
 }
 
+function toNonNegativeInt(value: unknown, field: string): number {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 0) {
+    throw new Error(`Invalid ${field}`);
+  }
+  return numberValue;
+}
+
 function handleDomainMessage(
   message: ClientMessage,
   userId: UserId,
@@ -103,6 +112,16 @@ function handleDomainMessage(
       return true;
     case 'edit_post':
       docRef.doc = editPost(docRef.doc, userId, message.id, message.text);
+      return true;
+    case 'edit_post_live':
+      docRef.doc = applyLiveEdit(
+        docRef.doc,
+        userId,
+        message.id,
+        toNonNegativeInt(message.index, 'index'),
+        toNonNegativeInt(message.deleteCount, 'deleteCount'),
+        String(message.text ?? '')
+      );
       return true;
     case 'delete_post':
       docRef.doc = deletePost(docRef.doc, userId, message.id);

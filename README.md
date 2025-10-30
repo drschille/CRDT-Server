@@ -29,3 +29,5 @@ A lightweight dashboard lives in `web/` for sending actions and viewing live sna
    python -m http.server 4173 --directory web
    ```
 3. Open http://localhost:4173, optionally enter a username to reuse an identity, and press **Connect** (default URL targets `ws://localhost:3000/ws`).
+
+Live editing is enabled for every public post—any connected user can type directly into a post’s editor and the CRDT-backed server will merge updates in real time. Private posts remain editable only by their authors.

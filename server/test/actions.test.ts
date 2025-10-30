@@ -11,6 +11,7 @@ describe('addPost', () => {
 
     expect(post).toBeTruthy();
     expect(post?.authorId).toBe('user-1');
-    expect(post?.text).toBe('Hello world');
+    expect(post?.text.toString()).toBe('Hello world');
+    expect(post?.lastEditedBy).toBe('user-1');
   });
 });

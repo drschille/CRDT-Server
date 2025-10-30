@@ -1,3 +1,5 @@
+import type { Text } from '@automerge/automerge';
+
 export type PostId = string;
 export type UserId = string;
 
@@ -6,9 +8,10 @@ export type Visibility = 'public' | 'private';
 export interface Post {
   id: PostId;
   authorId: UserId;
-  text: string;
+  text: Text;
   createdAt: string;
   editedAt?: string;
+  lastEditedBy?: UserId;
   likes: Record<UserId, true>;
   visibility: Visibility;
 }
@@ -17,4 +20,17 @@ export interface BoardDoc extends Record<string, unknown> {
   posts: Post[];
 }
 
-export interface FilteredBoard extends BoardDoc {}
+export interface FilteredPost {
+  id: PostId;
+  authorId: UserId;
+  text: string;
+  createdAt: string;
+  editedAt?: string;
+  lastEditedBy?: UserId;
+  likes: Record<UserId, true>;
+  visibility: Visibility;
+}
+
+export interface FilteredBoard {
+  posts: FilteredPost[];
+}
