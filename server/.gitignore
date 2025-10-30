@@ -6,3 +6,4 @@ dist
 .DS_Store
 data/board.bin
 data/*.tmp
+*.tsbuildinfo

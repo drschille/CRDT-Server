@@ -13,7 +13,7 @@ export interface Post {
   visibility: Visibility;
 }
 
-export interface BoardDoc {
+export interface BoardDoc extends Record<string, unknown> {
   posts: Post[];
 }
 
