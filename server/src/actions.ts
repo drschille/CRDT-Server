@@ -133,7 +133,6 @@ export function addItem(
   quantity?: string,
   vendor?: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   const label = requireItemLabel(rawLabel);
 
@@ -168,7 +167,6 @@ export function updateItemLabel(
   itemId: string,
   rawLabel: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   const label = requireItemLabel(rawLabel);
 
@@ -185,7 +183,6 @@ export function setItemQuantity(
   itemId: string,
   quantity?: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'set_item_quantity', (draft) => {
     const item = requireListItem(draft, itemId);
@@ -205,7 +202,6 @@ export function setItemVendor(
   itemId: string,
   vendor?: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'set_item_vendor', (draft) => {
     const item = requireListItem(draft, itemId);
@@ -225,7 +221,6 @@ export function setItemNotes(
   itemId: string,
   notes?: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   const trimmed = trimNotes(notes);
   return Automerge.change(doc, 'set_item_notes', (draft) => {
@@ -245,7 +240,6 @@ export function toggleItemChecked(
   itemId: string,
   checked: boolean
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'toggle_item_checked', (draft) => {
     const item = requireListItem(draft, itemId);
@@ -366,12 +360,6 @@ function requireListItem(doc: ShoppingListDoc, itemId: string): ShoppingListDoc[
     throw new Error('Item not found');
   }
   return item;
-}
-
-function ensureListDocMatches(doc: ShoppingListDoc, entry: ListRegistryEntry): void {
-  if (doc.listId !== entry.id) {
-    throw new Error('List mismatch');
-  }
 }
 
 function requireListName(raw: string): string {
