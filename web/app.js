@@ -1,9 +1,20 @@
+const STORAGE_KEY = 'collab-lists-login';
+
+const authScreen = document.querySelector('#auth-screen');
+const appShell = document.querySelector('#app-shell');
+const loginForm = document.querySelector('#login-form');
+const loginServerInput = document.querySelector('#login-server-url');
+const loginUsernameInput = document.querySelector('#login-username');
+const logoutBtn = document.querySelector('#logout-btn');
+
+const navButtons = Array.from(document.querySelectorAll('.nav-btn[data-view]'));
+const views = {
+  lists: document.querySelector('#lists-view'),
+  bulletins: document.querySelector('#bulletins-view')
+};
+
 const connectionStatusEl = document.querySelector('#connection-status');
 const connectionLabelEl = document.querySelector('#connection-label');
-const connectBtn = document.querySelector('#connect-btn');
-const disconnectBtn = document.querySelector('#disconnect-btn');
-const serverUrlInput = document.querySelector('#server-url');
-const usernameInput = document.querySelector('#username');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
 
@@ -13,23 +24,22 @@ const createListForm = document.querySelector('#create-list-form');
 const listNameInput = document.querySelector('#list-name');
 const listVisibilitySelect = document.querySelector('#list-visibility');
 
-const listDetailSection = document.querySelector('#list-detail');
-const activeListNameEl = document.querySelector('#active-list-name');
-const activeListMetaEl = document.querySelector('#active-list-meta');
 const closeListBtn = document.querySelector('#close-list-btn');
 const listEmptyEl = document.querySelector('#list-empty');
 const listContentEl = document.querySelector('#list-content');
+const activeListNameEl = document.querySelector('#active-list-name');
+const activeListMetaEl = document.querySelector('#active-list-meta');
 const addItemForm = document.querySelector('#add-item-form');
 const itemLabelInput = document.querySelector('#item-label');
 const itemQuantityInput = document.querySelector('#item-quantity');
 const itemVendorInput = document.querySelector('#item-vendor');
 const itemsContainer = document.querySelector('#items');
 
-const bulletinsEmptyState = document.querySelector('#bulletins-empty');
-const bulletinListEl = document.querySelector('#bulletin-list');
 const bulletinForm = document.querySelector('#bulletin-form');
 const bulletinTextInput = document.querySelector('#bulletin-text');
 const bulletinVisibilitySelect = document.querySelector('#bulletin-visibility');
+const bulletinsEmptyState = document.querySelector('#bulletins-empty');
+const bulletinListEl = document.querySelector('#bulletin-list');
 
 let socket = null;
 let currentUserId = null;
@@ -41,12 +51,16 @@ const listStates = new Map();
 let bulletins = [];
 let activeListId = null;
 
+const state = {
+  activeView: 'lists',
+  isLoggingOut: false,
+  credentials: null
+};
+
 function setConnectedState(isConnected) {
   connectionStatusEl.classList.toggle('status-dot--connected', isConnected);
   connectionStatusEl.classList.toggle('status-dot--disconnected', !isConnected);
   connectionLabelEl.textContent = isConnected ? 'Connected' : 'Disconnected';
-  connectBtn.disabled = isConnected;
-  disconnectBtn.disabled = !isConnected;
 }
 
 function showMessage(text, isError = false) {
@@ -57,90 +71,40 @@ function showMessage(text, isError = false) {
   }
 }
 
-function ensureSocketOpen() {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error('WebSocket not connected');
-  }
+function showAuthScreen() {
+  authScreen.classList.remove('hidden');
+  appShell.classList.add('hidden');
 }
 
-function connect() {
-  const url = serverUrlInput.value.trim();
-  if (!url) {
-    showMessage('Enter a server URL to connect', true);
-    return;
-  }
+function showAppShell() {
+  authScreen.classList.add('hidden');
+  appShell.classList.remove('hidden');
+  setActiveView(state.activeView);
+}
 
-  const usernameRaw = usernameInput.value.trim();
-  const username = usernameRaw.toLowerCase();
-  if (username && !/^[a-z0-9_-]{1,32}$/.test(username)) {
-    showMessage('Username may include letters, numbers, underscores, and dashes (max 32 chars)', true);
-    return;
-  }
-  usernameInput.value = username;
+function saveCredentials(creds) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(creds));
+}
 
-  if (!AutomergeLib) {
-    showMessage('Automerge library failed to load', true);
-    return;
-  }
-
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.close();
-  }
-
-  let connectUrl;
+function loadCredentials() {
   try {
-    const parsed = new URL(url);
-    if (username) {
-      parsed.searchParams.set('username', username);
-    } else {
-      parsed.searchParams.delete('username');
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return null;
     }
-    connectUrl = parsed.toString();
+    const parsed = JSON.parse(raw);
+    if (!parsed.serverUrl) {
+      return null;
+    }
+    return parsed;
   } catch (error) {
-    console.error('Invalid server URL', error);
-    showMessage('Invalid server URL', true);
-    return;
+    console.warn('Failed to load cached credentials', error);
+    return null;
   }
-
-  showMessage(`Connecting to ${connectUrl}…`);
-  socket = new WebSocket(connectUrl);
-
-  socket.addEventListener('open', () => {
-    resetClientState(false);
-    setConnectedState(true);
-    showMessage('Connected');
-    socket.send(JSON.stringify({ type: 'hello', clientVersion: 'web-1.0-lists' }));
-    sendSubscribe({ kind: 'registry' });
-    sendSubscribe({ kind: 'bulletins' });
-    requestFullState({ kind: 'registry' });
-    requestFullState({ kind: 'bulletins' });
-  });
-
-  socket.addEventListener('message', (event) => {
-    try {
-      handleMessage(JSON.parse(event.data));
-    } catch (error) {
-      console.error('Failed to handle message', error);
-      showMessage('Received malformed message from server', true);
-    }
-  });
-
-  socket.addEventListener('close', () => {
-    setConnectedState(false);
-    resetClientState(true);
-    showMessage('Disconnected from server');
-  });
-
-  socket.addEventListener('error', (event) => {
-    console.error('WebSocket error', event);
-    showMessage('WebSocket error', true);
-  });
 }
 
-function disconnect() {
-  if (socket) {
-    socket.close();
-  }
+function clearCredentials() {
+  localStorage.removeItem(STORAGE_KEY);
 }
 
 function resetClientState(clearUI) {
@@ -159,11 +123,82 @@ function resetClientState(clearUI) {
 }
 
 function updateCurrentUser() {
-  if (!currentUserId) {
-    currentUserEl.textContent = '';
+  currentUserEl.textContent = currentUserId ? `Signed in as ${currentUserId}` : '';
+}
+
+function connectWithCredentials(creds) {
+  state.credentials = creds;
+  loginServerInput.value = creds.serverUrl;
+  loginUsernameInput.value = creds.username ?? '';
+  showMessage(`Connecting to ${creds.serverUrl}…`);
+
+  if (socket) {
+    socket.close();
+  }
+  resetClientState(false);
+
+  let connectUrl;
+  try {
+    connectUrl = buildConnectUrl(creds.serverUrl, creds.username);
+  } catch (error) {
+    showMessage(error.message, true);
     return;
   }
-  currentUserEl.textContent = `You are signed in as ${currentUserId}`;
+
+  socket = new WebSocket(connectUrl);
+
+  socket.addEventListener('open', () => {
+    setConnectedState(true);
+    showAppShell();
+  });
+
+  socket.addEventListener('message', (event) => {
+    try {
+      handleMessage(JSON.parse(event.data));
+    } catch (error) {
+      console.error('Failed to handle message', error);
+      showMessage('Received malformed message from server', true);
+    }
+  });
+
+  socket.addEventListener('close', () => {
+    setConnectedState(false);
+    if (state.isLoggingOut) {
+      showMessage('Logged out');
+    } else {
+      showMessage('Disconnected from server', true);
+    }
+    resetClientState(true);
+    showAuthScreen();
+    state.isLoggingOut = false;
+  });
+
+  socket.addEventListener('error', (event) => {
+    console.error('WebSocket error', event);
+    showMessage('WebSocket error', true);
+  });
+}
+
+function disconnect() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.close();
+  }
+  socket = null;
+}
+
+function buildConnectUrl(serverUrl, username) {
+  let parsed;
+  try {
+    parsed = new URL(serverUrl);
+  } catch {
+    throw new Error('Invalid server URL');
+  }
+  if (username) {
+    parsed.searchParams.set('username', username.trim().toLowerCase());
+  } else {
+    parsed.searchParams.delete('username');
+  }
+  return parsed.toString();
 }
 
 function handleMessage(message) {
@@ -171,6 +206,13 @@ function handleMessage(message) {
     case 'welcome':
       currentUserId = message.userId;
       updateCurrentUser();
+      if (state.credentials) {
+        saveCredentials(state.credentials);
+      }
+      sendSubscribe({ kind: 'registry' });
+      sendSubscribe({ kind: 'bulletins' });
+      requestFullState({ kind: 'registry' });
+      requestFullState({ kind: 'bulletins' });
       break;
     case 'snapshot':
       handleSnapshot(message.doc, message.state);
@@ -186,27 +228,27 @@ function handleMessage(message) {
   }
 }
 
-function handleSnapshot(docSelector, state) {
+function handleSnapshot(docSelector, stateData) {
   const descriptor = parseServerDescriptor(docSelector);
   switch (descriptor.kind) {
     case 'registry': {
       registryEntries.clear();
-      for (const entry of Array.isArray(state) ? state : []) {
+      for (const entry of Array.isArray(stateData) ? stateData : []) {
         registryEntries.set(entry.id, entry);
       }
       renderLists();
       break;
     }
     case 'bulletins': {
-      bulletins = Array.isArray(state) ? state : [];
+      bulletins = Array.isArray(stateData) ? stateData : [];
       renderBulletins();
       break;
     }
     case 'list': {
-      if (state && state.listId) {
-        listStates.set(state.listId, state);
+      if (stateData && stateData.listId) {
+        listStates.set(stateData.listId, stateData);
         if (!activeListId) {
-          activeListId = state.listId;
+          activeListId = stateData.listId;
         }
         renderActiveList();
       }
@@ -239,10 +281,10 @@ function handleSync(docSelector, base64) {
 }
 
 function renderLists() {
-  listsContainer.innerHTML = '';
   const entries = Array.from(registryEntries.values()).sort(
     (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
   );
+  listsContainer.innerHTML = '';
   if (entries.length === 0) {
     listsEmptyState.classList.remove('hidden');
     return;
@@ -259,19 +301,18 @@ function renderLists() {
 
     const title = document.createElement('div');
     title.textContent = entry.name;
-    title.className = 'list-entry__title';
+    li.appendChild(title);
 
     const meta = document.createElement('div');
     meta.className = 'list-entry__meta';
     meta.innerHTML = `
       <span>Owner: ${entry.ownerId}</span>
-      <span>Visibility: ${entry.visibility}</span>
+      <span>${entry.visibility === 'public' ? 'Public' : 'Private'}</span>
       <span>Collaborators: ${Object.keys(entry.collaborators ?? {}).length}</span>
       ${entry.archived ? '<span>Archived</span>' : ''}
     `;
-
-    li.appendChild(title);
     li.appendChild(meta);
+
     li.addEventListener('click', () => selectList(entry.id));
     listsContainer.appendChild(li);
   }
@@ -321,68 +362,80 @@ function renderActiveList() {
     Object.keys(entry.collaborators ?? {}).length
   }`;
 
-  listEmptyEl.classList.add('hidden');
-  listContentEl.classList.remove('hidden');
-
   const listState = listStates.get(activeListId);
-  itemsContainer.innerHTML = '';
   if (!listState || listState.items.length === 0) {
-    const empty = document.createElement('li');
-    empty.className = 'empty-state';
-    empty.textContent = 'No items yet.';
-    itemsContainer.appendChild(empty);
+    listEmptyEl.classList.remove('hidden');
+    listContentEl.classList.add('hidden');
+    itemsContainer.innerHTML = '';
     return;
   }
 
+  listEmptyEl.classList.add('hidden');
+  listContentEl.classList.remove('hidden');
+
+  itemsContainer.innerHTML = '';
   for (const item of listState.items) {
     const li = document.createElement('li');
+
+    const main = document.createElement('div');
+    main.className = 'item-main';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = Boolean(item.checked);
+    checkbox.addEventListener('change', () =>
+      sendListAction(activeListId, {
+        type: 'toggle_item_checked',
+        itemId: item.id,
+        checked: checkbox.checked
+      })
+    );
 
     const info = document.createElement('div');
     info.className = 'item-info';
 
-    const label = document.createElement('div');
+    const label = document.createElement('span');
     label.className = 'item-label';
-    label.textContent = item.label;
     if (item.checked) {
-      label.style.textDecoration = 'line-through';
+      label.classList.add('checked');
     }
+    label.textContent = item.label;
     info.appendChild(label);
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
-    meta.innerHTML = `
-      <span>Added by ${item.addedBy}</span>
-      ${item.quantity ? `<span>Qty: ${item.quantity}</span>` : ''}
-      ${item.vendor ? `<span>Vendor: ${item.vendor}</span>` : ''}
-      ${item.notes ? `<span>Notes: ${item.notes}</span>` : ''}
-    `;
+    const parts = [];
+    parts.push(`Added by ${item.addedBy}`);
+    if (item.quantity) {
+      parts.push(`Qty: ${item.quantity}`);
+    }
+    if (item.vendor) {
+      parts.push(`Vendor: ${item.vendor}`);
+    }
+    if (item.notes) {
+      parts.push(`Notes: ${item.notes}`);
+    }
+    meta.textContent = parts.join(' • ');
     info.appendChild(meta);
+
+    main.appendChild(checkbox);
+    main.appendChild(info);
 
     const actions = document.createElement('div');
     actions.className = 'item-actions';
 
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.textContent = item.checked ? 'Uncheck' : 'Check';
-    toggleBtn.addEventListener('click', () => {
-      sendListAction(activeListId, {
-        type: 'toggle_item_checked',
-        itemId: item.id,
-        checked: !item.checked
-      });
-    });
-    actions.appendChild(toggleBtn);
-
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
-    removeBtn.classList.add('secondary');
-    removeBtn.textContent = 'Remove';
-    removeBtn.addEventListener('click', () => {
-      sendListAction(activeListId, { type: 'remove_item', itemId: item.id });
-    });
+    removeBtn.className = 'icon-btn';
+    removeBtn.setAttribute('aria-label', 'Remove item');
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () =>
+      sendListAction(activeListId, { type: 'remove_item', itemId: item.id })
+    );
+
     actions.appendChild(removeBtn);
 
-    li.appendChild(info);
+    li.appendChild(main);
     li.appendChild(actions);
     itemsContainer.appendChild(li);
   }
@@ -437,14 +490,20 @@ function ensureReplica(descriptor) {
 }
 
 function sendSubscribe(descriptor) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
   ensureReplica(descriptor);
-  ensureSocketOpen();
-  socket.send(JSON.stringify({ type: 'subscribe', doc: toWireSelector(descriptor) }));
+  if (descriptor.kind !== 'lists-registry-initial') {
+    socket.send(JSON.stringify({ type: 'subscribe', doc: toWireSelector(descriptor) }));
+  }
   flushSync(descriptor);
 }
 
 function sendUnsubscribe(descriptor) {
-  ensureSocketOpen();
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
   replicas.delete(descriptorKey(descriptor));
   socket.send(JSON.stringify({ type: 'unsubscribe', doc: toWireSelector(descriptor) }));
 }
@@ -534,6 +593,12 @@ function sendBulletinAction(action) {
   socket.send(JSON.stringify({ type: 'bulletin_action', action }));
 }
 
+function ensureSocketOpen() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    throw new Error('WebSocket not connected');
+  }
+}
+
 function base64ToUint8Array(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -553,9 +618,41 @@ function uint8ArrayToBase64(bytes) {
   return btoa(binary);
 }
 
-connectBtn.addEventListener('click', connect);
-disconnectBtn.addEventListener('click', disconnect);
-closeListBtn.addEventListener('click', closeList);
+function setActiveView(view) {
+  state.activeView = view;
+  navButtons.forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.view === view);
+  });
+  views.lists.classList.toggle('hidden', view !== 'lists');
+  views.bulletins.classList.toggle('hidden', view !== 'bulletins');
+}
+
+loginForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const serverUrl = loginServerInput.value.trim();
+  const username = loginUsernameInput.value.trim().toLowerCase();
+  if (!serverUrl) {
+    showMessage('Server URL is required', true);
+    return;
+  }
+  const creds = { serverUrl, username: username || null };
+  connectWithCredentials(creds);
+});
+
+logoutBtn.addEventListener('click', () => {
+  state.isLoggingOut = true;
+  clearCredentials();
+  disconnect();
+});
+
+navButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const view = btn.dataset.view;
+    if (view) {
+      setActiveView(view);
+    }
+  });
+});
 
 createListForm.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -603,6 +700,8 @@ addItemForm.addEventListener('submit', (event) => {
   }
 });
 
+closeListBtn.addEventListener('click', closeList);
+
 bulletinForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = bulletinTextInput.value.trim();
@@ -620,5 +719,13 @@ bulletinForm.addEventListener('submit', (event) => {
   }
 });
 
-setConnectedState(false);
-showMessage('Enter a server URL and press Connect');
+const savedCredentials = loadCredentials();
+if (savedCredentials) {
+  state.activeView = 'lists';
+  loginServerInput.value = savedCredentials.serverUrl;
+  loginUsernameInput.value = savedCredentials.username ?? '';
+  connectWithCredentials(savedCredentials);
+} else {
+  showAuthScreen();
+  setActiveView('lists');
+}
