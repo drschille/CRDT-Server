@@ -15,10 +15,14 @@ async function main() {
   const docRef = { doc };
 
   app.get('/healthz', (_req, res) => {
-    res.json({ status: 'ok' });
+    res.json({ ok: true });
   });
 
   app.get('/debug/state', (_req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
     res.json({ state: Automerge.toJS(docRef.doc) });
   });
 
