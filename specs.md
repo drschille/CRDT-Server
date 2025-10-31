@@ -8,9 +8,9 @@ Build a **TypeScript Node.js** server that maintains a **centralized CRDT** for 
 * **Eventual consistency**: implemented server-side using **Automerge v2**.
 * **Transport**: WebSocket for realtime; minimal REST for health/debug.
 * **Auth (optional for MVP)**: anonymous or simple bearer token.
-* **Privacy (MVP)**: `visibility: 'public' | 'private'` on posts. Server filters private posts per user.
+* **Clients**: Minimalistic with **Automerge replica**.
 
-> Rationale: Server holds the only CRDT replica. Clients send **domain actions** (`add_post`, `like_post`, etc.). Server applies CRDT changes and broadcasts a filtered **projection** to each client.
+> Rationale: Server and all connected clients each hold an **Automerge replica** of the shared document. Clients apply local **domain actions** (`add_post`, `like_post`, etc.) optimistically to their replica, then exchange Automerge sync messages with the server to converge. The server remains the authoritative persistence and privacy filter (only it stores private data for all users) and still broadcasts filtered **projections** as snapshots for convenience.
 
 ---
 
@@ -89,7 +89,8 @@ type ClientMsg =
   | { type: 'delete_post'; id: PostId }
   | { type: 'like_post'; id: PostId }
   | { type: 'unlike_post'; id: PostId }
-  | { type: 'request_full_state' }; // debugging
+  | { type: 'request_full_state' } // debugging
+  | { type: 'sync', data: Uint8Array }; // raw Automerge sync message bytes (base64 when over JSON)
 ```
 
 ### 4.3 Server → Client messages (JSON)
@@ -99,6 +100,7 @@ type ServerMsg =
   | { type: 'welcome'; userId: UserId }
   | { type: 'snapshot'; state: FilteredBoard }           // full projection for this user
   | { type: 'delta'; state: FilteredBoard }              // minimal: only changed posts if time permits
+  | { type: 'sync', data: Uint8Array }                   // raw Automerge sync response
   | { type: 'error'; code: string; message: string };
 ```
 
@@ -112,36 +114,42 @@ type ServerMsg =
 
 ---
 
-## 5) Server Behavior (Automerge-centric)
+## 5) Server Behavior (Multi‑Replica Automerge)
 
 1. **Startup**
 
-   * If `data/board.bin` exists, `Automerge.load()` it; else `Automerge.from<BoardDoc>({ posts: [] })`.
-   * Start Express (`/healthz`, `/debug/state`).
-   * Start WS server and accept connections.
+  * Load persisted canonical replica: if `data/board.bin` exists, `Automerge.load()`; else create `Automerge.from<BoardDoc>({ posts: [] })`.
+  * Start Express (`/healthz`, `/debug/state`).
+  * Start WS server and accept connections.
 
-2. **On connection**
+2. **On connection (handshake)**
 
-   * Resolve `userId`.
-   * Send `{ type: 'welcome', userId }`.
-   * Send `{ type: 'snapshot', state: filter(doc, userId) }`.
+  * Resolve `userId`.
+  * Initialize an in-memory sync state object per connection (`Automerge.getSyncState()`).
+  * Send `{ type: 'welcome', userId }`.
+  * Generate initial sync message (if any) via `Automerge.generateSyncMessage(serverDoc, syncState)` and send `{ type: 'sync', data: <base64> }`.
+  * Optionally also send a convenience `{ type: 'snapshot', state: filter(serverDoc, userId) }` for fast UI bootstrap (clients can render while CRDT catches up).
 
-3. **On client message**
+3. **On client sync message**
 
-   * Validate payload (type, required fields, string length).
-   * Run a single `Automerge.change(doc, ...)` that applies the domain action:
+  * Decode base64 → `Uint8Array`.
+  * Call `Automerge.receiveSyncMessage(serverDoc, syncState, bytes)`; if it mutates the server doc (returns a new doc), persist and update reference.
+  * After applying, attempt another `generateSyncMessage`; send if non-null.
+  * Finally, may send an updated `snapshot` (optional if client fully relies on its local replica state).
 
-   * `add_post`: push new `Post` with server UUID, timestamps, empty likes map.
-   * `edit_post`: update `text`, `editedAt`, and `lastEditedBy` (authors or, for public posts, any user).
-   * `edit_post_live`: apply `{ index, deleteCount, text }` deltas to the Automerge.Text so multiple users can co-edit in real time and stamp `lastEditedBy`.
-   * `delete_post`: only author can delete; remove from array.
-   * `like_post` / `unlike_post`: toggle `likes[userId]`.
-   * Persist: `writeFileAtomic('data/board.bin', Automerge.save(doc))`.
-   * Broadcast to **all clients** their **personalized snapshot**:
+4. **On domain action (client → server)**
 
-     * For each connection `c`, compute `filter(doc, c.userId)` and send `{ type: 'snapshot', state }`.
+  * Validate payload (type, required fields, length, permissions).
+  * Apply change: one `Automerge.change(serverDoc, 'action:<type>', draft => { ... })`.
+    * `add_post`: push new `Post` (server authoritative UUID).
+    * `edit_post`: replace entire `text` or (if clients send granular deltas) integrate into `Automerge.Text`.
+    * `edit_post_live`: apply `{ index, deleteCount, text }` into `Automerge.Text.splice(...)` semantics.
+    * `delete_post`: author only.
+    * `like_post` / `unlike_post`: toggle set membership.
+  * Persist (`writeFileAtomic`).
+  * For every connection: update its sync state and attempt a `generateSyncMessage`; send if available (keeps replicas converging). Also send personalized `snapshot` for UI convenience.
 
-4. **Filtering (privacy)**
+5. **Filtering (privacy)**
 
   ```ts
   function filter(doc: BoardDoc, userId: UserId): FilteredBoard {
@@ -162,13 +170,13 @@ type ServerMsg =
   }
   ```
 
-5. **Validation & Limits**
+6. **Validation & Limits**
 
    * `text` max 2,000 chars.
    * Post count cap (e.g., 2,000) to keep memory bounded.
    * Rate-limit per connection (simple token bucket in memory).
 
-6. **Errors**
+7. **Errors**
 
    * Send `{ type: 'error', code, message }` on invalid input or forbidden action.
    * Keep connection open unless abuse is detected.
@@ -243,14 +251,15 @@ server/
 
 ---
 
-## 11) Acceptance Criteria (MVP)
+## 11) Acceptance Criteria (MVP – Multi‑Replica)
 
-* Start server, connect 2+ clients via WS.
-* Client A adds a **public** post → all clients receive it.
-* Client A adds a **private** post → only A receives it.
-* Client B cannot edit/delete A’s posts; can like/unlike A’s public posts.
-* Restart server → state is preserved.
-* Basic rate limit prevents obvious flooding.
+* Start server, connect 2+ clients via WS; each converges replicas via `sync` messages.
+* Client A adds a **public** post locally; sends domain action; all clients converge and display it.
+* Client A adds a **private** post; only A’s replica contains it; other replicas never receive it.
+* Client B cannot edit/delete A’s private posts; can like/unlike A’s public posts and change appears for all.
+* Restart server → persisted state loads and subsequent sync brings clients back in line.
+* Basic rate limit prevents flooding of domain actions & sync messages.
+* Offline scenario: Client goes offline, performs local edits (at least add + text edit), reconnects, and after sync convergence the server persists merged state without conflicts.
 
 ---
 
@@ -378,21 +387,23 @@ export function createWSServer(server: import('http').Server, docRef: { doc: Aut
 
 ---
 
-## 14) How Android Will Use It (contract)
+## 14) How Android & Web Clients Use It (multi-replica contract)
 
-* Open WS to `/ws`.
-* On `welcome`, store `userId` (optional).
-* On `snapshot`, replace local UI list with `state.posts`.
-* Send actions as simple JSON messages per Section 4.2.
-* No CRDT on Android; the server merges.
+* Maintain a local Automerge replica (`clientDoc`).
+* On connect: open WS to `/ws`; receive `welcome` then `sync` messages until convergence (apply via `receiveSyncMessage`). Optionally render initial `snapshot` for faster UI.
+* Apply user edits optimistically: run `Automerge.change(clientDoc, ...)` immediately, update UI, enqueue domain action JSON to server for validation & persistence.
+* Periodically (or after each local change) attempt to produce a sync message: `generateSyncMessage(clientDoc, syncState)` and send `{ type: 'sync', data }` (base64).
+* On server `sync` replies, integrate and re-render only the affected posts.
+* Offline: keep applying changes locally; buffer outgoing `sync` + domain actions; flush when connection restores.
+* Privacy: clients only store posts they are allowed to see (received via snapshots or sync convergence). Private posts of others never materialize locally.
 
 ---
 
 ## 15) Non-Goals (for this POC)
 
-* No offline queueing on clients.
-* No conflict resolution on clients.
-* No granular CRDT “diff” transport (full snapshots only).
+* No peer-to-peer client sync (always via server).
+* No advanced delta compression beyond Automerge sync protocol.
+* No replay log UI (storage may exist as stretch goal only).
 * No multi-document support.
 
 ---
