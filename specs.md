@@ -8,7 +8,7 @@ Build a **TypeScript Node.js** server that maintains a **centralized CRDT** for 
 * **Eventual consistency**: implemented server-side using **Automerge v2**.
 * **Transport**: WebSocket for realtime; minimal REST for health/debug.
 * **Auth (optional for MVP)**: anonymous or simple bearer token.
-* **Minimalistic front end**: implemented client-side using **Automerge-<client stack>** respectfully.
+* **Clients**: Minimalistic with **Automerge replica**.
 
 > Rationale: Server and all connected clients each hold an **Automerge replica** of the shared document. Clients apply local **domain actions** (`add_post`, `like_post`, etc.) optimistically to their replica, then exchange Automerge sync messages with the server to converge. The server remains the authoritative persistence and privacy filter (only it stores private data for all users) and still broadcasts filtered **projections** as snapshots for convenience.
 
