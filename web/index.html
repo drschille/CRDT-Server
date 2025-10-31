@@ -3,77 +3,125 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CRDT Board</title>
+    <title>Collaborative Lists</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="app">
-      <section class="connection">
-        <h1>CRDT Board</h1>
-        <div class="status">
-          <span id="connection-status" class="status-dot status-dot--disconnected"></span>
-          <span id="connection-label">Disconnected</span>
-        </div>
-        <div class="controls">
+    <main class="root">
+      <div id="auth-screen" class="auth-card">
+        <h1>Collaborative Lists</h1>
+        <p class="auth-subtitle">Sync wish lists and bulletins across devices.</p>
+        <form id="login-form" class="auth-form">
           <label>
             Server URL
-            <input id="server-url" type="text" value="ws://localhost:3000/ws" />
+            <input id="login-server-url" type="text" value="ws://localhost:3000/ws" required />
           </label>
           <label>
             Username (optional)
-            <input id="username" type="text" placeholder="e.g. alice" />
+            <input id="login-username" type="text" maxlength="32" placeholder="e.g. alice" />
           </label>
-          <button id="connect-btn" type="button">Connect</button>
-          <button id="disconnect-btn" type="button" disabled>Disconnect</button>
-        </div>
-        <div class="current-user" id="current-user"></div>
-        <div class="messages" id="messages"></div>
-      </section>
-
-      <section class="composer">
-        <h2>Create Post</h2>
-        <form id="composer-form">
-          <textarea
-            id="post-text"
-            placeholder="Share an update…"
-            maxlength="2000"
-            required
-          ></textarea>
-          <div class="composer-controls">
-            <label>
-              Visibility
-              <select id="visibility">
-                <option value="public" selected>Public</option>
-                <option value="private">Private</option>
-              </select>
-            </label>
-            <button type="submit">Publish</button>
-          </div>
+          <button type="submit">Enter</button>
         </form>
-      </section>
+      </div>
 
-      <section class="feed">
-        <h2>Latest Posts</h2>
-        <div id="posts"></div>
-      </section>
+      <div id="app-shell" class="app-shell hidden">
+        <aside class="nav-rail">
+          <button class="nav-btn active" data-view="lists">Lists</button>
+          <button class="nav-btn" data-view="bulletins">Bulletins</button>
+          <div class="nav-spacer"></div>
+          <button class="nav-btn nav-btn--logout" id="logout-btn">Logout</button>
+        </aside>
+
+        <div class="app-main">
+          <header class="app-header">
+            <div class="status">
+              <span id="connection-status" class="status-dot status-dot--disconnected"></span>
+              <span id="connection-label">Disconnected</span>
+              <span id="current-user" class="current-user"></span>
+            </div>
+            <div class="messages" id="messages"></div>
+          </header>
+
+          <section id="lists-view" class="view">
+            <div class="lists-layout">
+              <div class="lists-panel">
+                <form id="create-list-form" class="card">
+                  <h2>Create List</h2>
+                  <div class="form-grid">
+                    <label>
+                      Name
+                      <input id="list-name" type="text" maxlength="200" required />
+                    </label>
+                    <label>
+                      Visibility
+                      <select id="list-visibility">
+                        <option value="private" selected>Private</option>
+                        <option value="public">Public</option>
+                      </select>
+                    </label>
+                  </div>
+                  <button type="submit">Create</button>
+                </form>
+                <div id="lists-empty" class="empty-state">No lists yet. Create one to get started.</div>
+                <ul id="lists" class="lists__collection"></ul>
+              </div>
+
+              <div class="list-detail">
+                <div class="list-detail__header">
+                  <div>
+                    <h2 id="active-list-name">Select a list</h2>
+                    <div id="active-list-meta" class="list-meta"></div>
+                  </div>
+                  <button id="close-list-btn" type="button" class="secondary">Close</button>
+                </div>
+                <div id="list-empty" class="empty-state">No list selected.</div>
+                <div id="list-content" class="list-content hidden">
+                  <form id="add-item-form" class="card">
+                    <h3>Add Item</h3>
+                    <div class="form-grid">
+                      <label>
+                        Item name
+                        <input id="item-label" type="text" maxlength="200" required />
+                      </label>
+                      <label>
+                        Quantity (optional)
+                        <input id="item-quantity" type="text" maxlength="200" />
+                      </label>
+                      <label>
+                        Vendor (optional)
+                        <input id="item-vendor" type="text" maxlength="200" />
+                      </label>
+                    </div>
+                    <button type="submit">Add</button>
+                  </form>
+                  <ul id="items" class="items"></ul>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="bulletins-view" class="view hidden">
+            <form id="bulletin-form" class="card">
+              <h2>Post Bulletin</h2>
+              <label>
+                Message
+                <textarea id="bulletin-text" maxlength="2000" required placeholder="Share an announcement…"></textarea>
+              </label>
+              <label>
+                Visibility
+                <select id="bulletin-visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="private">Private</option>
+                </select>
+              </label>
+              <button type="submit">Post</button>
+            </form>
+            <div id="bulletins-empty" class="empty-state">No bulletins yet.</div>
+            <ul id="bulletin-list" class="bulletin-list"></ul>
+          </section>
+        </div>
+      </div>
     </main>
-
-    <template id="post-template">
-      <article class="post">
-        <header class="post__meta">
-          <span class="post__author"></span>
-          <span class="post__timestamp"></span>
-          <span class="post__visibility"></span>
-        </header>
-        <textarea class="post__editor" spellcheck="false"></textarea>
-        <footer class="post__actions">
-          <button class="btn-like" type="button"></button>
-          <span class="likes"></span>
-          <button class="btn-delete" type="button">Delete</button>
-          <span class="post__status"></span>
-        </footer>
-      </article>
-    </template>
 
     <script src="./vendor/automerge.js"></script>
     <script type="module" src="./app.js"></script>

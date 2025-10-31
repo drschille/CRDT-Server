@@ -2,35 +2,107 @@ import { Buffer } from 'node:buffer';
 import type { Server as HTTPServer } from 'node:http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import * as Automerge from '@automerge/automerge';
-import { filterForUser } from './filter.js';
-import { addPost, applyLiveEdit, deletePost, editPost, likePost, unlikePost } from './actions.js';
+import {
+  addBulletin,
+  addItem,
+  archiveList,
+  createList,
+  deleteBulletin,
+  deleteListEntry,
+  renameList,
+  removeItem,
+  setCollaborators,
+  setItemNotes,
+  setItemQuantity,
+  setItemVendor,
+  toggleItemChecked,
+  updateListVisibility,
+  updateItemLabel,
+  editBulletin
+} from './actions.js';
+import {
+  deleteListDoc,
+  forgetListDoc,
+  loadListDoc,
+  saveBulletinDoc,
+  saveListDoc,
+  saveRegistryDoc
+} from './crdt.js';
+import { filterBulletins, filterListDoc, filterRegistryDoc, isListVisibleTo } from './filter.js';
 import { resolveUserId } from './auth.js';
-import { saveDoc } from './crdt.js';
 import { info, warn } from './logger.js';
-import { BoardDoc, UserId } from './types.js';
+import {
+  BulletinDoc,
+  ListId,
+  ListRegistryDoc,
+  ListRegistryEntry,
+  ShoppingListDoc,
+  UserId,
+  Visibility
+} from './types.js';
 
-interface DocRef {
-  doc: Automerge.Doc<BoardDoc>;
+const RATE_LIMIT_CAPACITY = 40;
+const RATE_LIMIT_REFILL_PER_SECOND = 20;
+const RATE_LIMIT_COST_ACTION = 1;
+const RATE_LIMIT_COST_SYNC = 0.25;
+
+type DocDescriptor =
+  | { kind: 'registry' }
+  | { kind: 'bulletins' }
+  | { kind: 'list'; listId: ListId };
+
+type ClientMessage =
+  | { type: 'hello'; clientVersion: string }
+  | { type: 'subscribe'; doc: DocSelector }
+  | { type: 'unsubscribe'; doc: DocSelector }
+  | { type: 'registry_action'; action: RegistryAction }
+  | { type: 'list_action'; listId: ListId; action: ListAction }
+  | { type: 'bulletin_action'; action: BulletinAction }
+  | { type: 'sync'; doc: DocSelector; data: string }
+  | { type: 'request_full_state'; doc?: DocSelector };
+
+type DocSelector = 'registry' | 'bulletins' | { listId: ListId };
+
+type RegistryAction =
+  | { type: 'create_list'; name: string; visibility?: Visibility; collaborators?: UserId[] }
+  | { type: 'rename_list'; listId: ListId; name: string }
+  | { type: 'update_list_visibility'; listId: ListId; visibility: Visibility }
+  | { type: 'set_collaborators'; listId: ListId; collaborators: UserId[] }
+  | { type: 'archive_list'; listId: ListId }
+  | { type: 'restore_list'; listId: ListId }
+  | { type: 'delete_list'; listId: ListId };
+
+type ListAction =
+  | { type: 'add_item'; label: string; quantity?: string; vendor?: string }
+  | { type: 'update_item'; itemId: string; label: string }
+  | { type: 'set_item_quantity'; itemId: string; quantity?: string }
+  | { type: 'set_item_vendor'; itemId: string; vendor?: string }
+  | { type: 'set_item_notes'; itemId: string; notes?: string }
+  | { type: 'toggle_item_checked'; itemId: string; checked: boolean }
+  | { type: 'remove_item'; itemId: string };
+
+type BulletinAction =
+  | { type: 'add_bulletin'; text: string; visibility?: Visibility }
+  | { type: 'edit_bulletin'; bulletinId: string; text: string }
+  | { type: 'delete_bulletin'; bulletinId: string };
+
+interface ServerContext {
+  registryDoc: Automerge.Doc<ListRegistryDoc>;
+  bulletinsDoc: Automerge.Doc<BulletinDoc>;
+  listDocs: Map<ListId, Automerge.Doc<ShoppingListDoc>>;
+}
+
+interface Subscription {
+  descriptor: DocDescriptor;
+  syncState: Automerge.SyncState;
 }
 
 interface Connection {
   socket: WebSocket;
   userId: UserId;
-  viewDoc: Automerge.Doc<BoardDoc>;
-  syncState: Automerge.SyncState;
   rateLimiter: TokenBucket;
+  subscriptions: Map<string, Subscription>;
 }
-
-type ClientMessage =
-  | { type: 'hello'; clientVersion: string }
-  | { type: 'add_post'; text: string; visibility?: 'public' | 'private' }
-  | { type: 'edit_post'; id: string; text: string }
-  | { type: 'edit_post_live'; id: string; index: number; deleteCount: number; text: string }
-  | { type: 'delete_post'; id: string }
-  | { type: 'like_post'; id: string }
-  | { type: 'unlike_post'; id: string }
-  | { type: 'request_full_state' }
-  | { type: 'sync'; data: string };
 
 class TokenBucket {
   private tokens: number;
@@ -63,12 +135,7 @@ class TokenBucket {
   }
 }
 
-const RATE_LIMIT_CAPACITY = 30;
-const RATE_LIMIT_REFILL_PER_SECOND = 15;
-const RATE_LIMIT_COST_DEFAULT = 1;
-const RATE_LIMIT_COST_LIVE_EDIT = 0.25;
-
-export function createWSServer(server: HTTPServer, docRef: DocRef): WebSocketServer {
+export function createWSServer(server: HTTPServer, context: ServerContext): WebSocketServer {
   const wss = new WebSocketServer({ server, path: '/ws' });
   const connections = new Set<Connection>();
 
@@ -77,48 +144,76 @@ export function createWSServer(server: HTTPServer, docRef: DocRef): WebSocketSer
     const connection: Connection = {
       socket,
       userId,
-      viewDoc: Automerge.from<BoardDoc>({ posts: [] }),
-      syncState: Automerge.initSyncState(),
-      rateLimiter: new TokenBucket(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_PER_SECOND)
+      rateLimiter: new TokenBucket(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_PER_SECOND),
+      subscriptions: new Map()
     };
     connections.add(connection);
 
     info('websocket connected', { userId });
     sendJson(socket, { type: 'welcome', userId });
-    refreshConnectionView(connection, docRef.doc);
-    sendSyncMessages(connection);
-    sendSnapshot(connection, docRef.doc);
+
+    void initializeConnection(connection, context);
 
     socket.on('message', (raw) => {
       void (async () => {
         try {
           const message = parseMessage(raw);
           if (message.type === 'hello') {
-            info('client hello', { userId, version: message.clientVersion });
+            info('client hello', { userId, version: (message as { clientVersion?: string }).clientVersion });
             return;
           }
 
-          if (message.type === 'request_full_state') {
-            sendSnapshot(connection, docRef.doc);
-            return;
+          switch (message.type) {
+            case 'subscribe':
+              await subscribe(connection, context, parseDocSelector(message.doc));
+              await sendSnapshot(connection, context, parseDocSelector(message.doc));
+              flushSync(connection, context, parseDocSelector(message.doc));
+              break;
+            case 'unsubscribe':
+              unsubscribe(connection, parseDocSelector(message.doc));
+              break;
+            case 'registry_action':
+              if (!consumeRateLimit(connection, RATE_LIMIT_COST_ACTION)) {
+                return;
+              }
+              await handleRegistryAction(connection, context, message.action);
+              await saveRegistryDoc(context.registryDoc);
+              broadcastDoc(connections, context, { kind: 'registry' });
+              break;
+            case 'list_action':
+              if (!consumeRateLimit(connection, RATE_LIMIT_COST_ACTION)) {
+                return;
+              }
+              await handleListAction(connection, context, message.listId, message.action);
+              broadcastDoc(connections, context, { kind: 'list', listId: message.listId });
+              break;
+            case 'bulletin_action':
+              if (!consumeRateLimit(connection, RATE_LIMIT_COST_ACTION)) {
+                return;
+              }
+              handleBulletinAction(connection, context, message.action);
+              await saveBulletinDoc(context.bulletinsDoc);
+              broadcastDoc(connections, context, { kind: 'bulletins' });
+              break;
+            case 'sync':
+              if (!consumeRateLimit(connection, RATE_LIMIT_COST_SYNC)) {
+                return;
+              }
+              handleSyncMessage(connection, context, parseDocSelector(message.doc), message.data);
+              break;
+            case 'request_full_state':
+              if (message.doc) {
+                await sendSnapshot(connection, context, parseDocSelector(message.doc));
+              } else {
+                for (const subscription of connection.subscriptions.values()) {
+                  await sendSnapshot(connection, context, subscription.descriptor);
+                }
+              }
+              break;
+            default:
+              throw new Error(`Unsupported message type ${(message as { type: string }).type}`);
           }
-
-          if (message.type === 'sync') {
-            handleSyncMessage(connection, message.data);
-            refreshConnectionView(connection, docRef.doc);
-            sendSyncMessages(connection);
-            return;
-          }
-
-          const didChange = handleDomainMessage(message, connection, docRef);
-          if (didChange) {
-            refreshConnectionView(connection, docRef.doc);
-            sendSyncMessages(connection);
-            await saveDoc(docRef.doc);
-            broadcastSnapshots(connections, docRef.doc);
-            broadcastSyncMessages(connections, docRef.doc, connection);
-          }
-        } catch (error: unknown) {
+        } catch (error) {
           warn('failed to handle message', {
             error: error instanceof Error ? error.message : String(error),
             userId
@@ -141,79 +236,339 @@ export function createWSServer(server: HTTPServer, docRef: DocRef): WebSocketSer
   return wss;
 }
 
-function parseMessage(raw: RawData): ClientMessage {
-  const text = rawDataToString(raw);
-  const parsed = JSON.parse(text) as ClientMessage;
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Invalid payload');
-  }
-  if (parsed.type === 'sync' && typeof parsed.data !== 'string') {
-    throw new Error('Invalid sync payload');
-  }
-  return parsed;
-}
-
-function toNonNegativeInt(value: unknown, field: string): number {
-  const numberValue = Number(value);
-  if (!Number.isInteger(numberValue) || numberValue < 0) {
-    throw new Error(`Invalid ${field}`);
-  }
-  return numberValue;
-}
-
-function handleDomainMessage(message: ClientMessage, connection: Connection, docRef: DocRef): boolean {
-  switch (message.type) {
-    case 'add_post':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_DEFAULT)) {
-        return false;
-      }
-      docRef.doc = addPost(
-        docRef.doc,
+async function handleRegistryAction(
+  connection: Connection,
+  context: ServerContext,
+  action: RegistryAction
+): Promise<void> {
+  switch (action.type) {
+    case 'create_list': {
+      const { doc, listId } = createList(
+        context.registryDoc,
         connection.userId,
-        String(message.text ?? ''),
-        message.visibility ?? 'public'
+        action.name,
+        action.visibility ?? 'private',
+        action.collaborators ?? []
       );
-      return true;
-    case 'edit_post':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_DEFAULT)) {
-        return false;
-      }
-      docRef.doc = editPost(docRef.doc, connection.userId, message.id, message.text);
-      return true;
-    case 'edit_post_live':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_LIVE_EDIT)) {
-        return false;
-      }
-      docRef.doc = applyLiveEdit(
-        docRef.doc,
+      context.registryDoc = doc;
+      const listDoc = await loadListDoc(listId);
+      context.listDocs.set(listId, listDoc);
+      await saveListDoc(listId, listDoc);
+      break;
+    }
+    case 'rename_list':
+      context.registryDoc = renameList(context.registryDoc, connection.userId, action.listId, action.name);
+      break;
+    case 'update_list_visibility':
+      context.registryDoc = updateListVisibility(
+        context.registryDoc,
         connection.userId,
-        message.id,
-        toNonNegativeInt(message.index, 'index'),
-        toNonNegativeInt(message.deleteCount, 'deleteCount'),
-        String(message.text ?? '')
+        action.listId,
+        action.visibility
       );
-      return true;
-    case 'delete_post':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_DEFAULT)) {
-        return false;
-      }
-      docRef.doc = deletePost(docRef.doc, connection.userId, message.id);
-      return true;
-    case 'like_post':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_DEFAULT)) {
-        return false;
-      }
-      docRef.doc = likePost(docRef.doc, connection.userId, message.id);
-      return true;
-    case 'unlike_post':
-      if (!consumeRateLimit(connection, RATE_LIMIT_COST_DEFAULT)) {
-        return false;
-      }
-      docRef.doc = unlikePost(docRef.doc, connection.userId, message.id);
-      return true;
+      break;
+    case 'set_collaborators':
+      context.registryDoc = setCollaborators(
+        context.registryDoc,
+        connection.userId,
+        action.listId,
+        action.collaborators
+      );
+      break;
+    case 'archive_list':
+      context.registryDoc = archiveList(context.registryDoc, connection.userId, action.listId, true);
+      break;
+    case 'restore_list':
+      context.registryDoc = archiveList(context.registryDoc, connection.userId, action.listId, false);
+      break;
+    case 'delete_list':
+      context.registryDoc = deleteListEntry(context.registryDoc, connection.userId, action.listId);
+      context.listDocs.delete(action.listId);
+      await deleteListDoc(action.listId);
+      break;
     default:
-      throw new Error(`Unsupported message type ${(message as { type: string }).type}`);
+      throw new Error(`Unsupported registry action ${(action as { type: string }).type}`);
   }
+}
+
+async function handleListAction(
+  connection: Connection,
+  context: ServerContext,
+  listId: ListId,
+  action: ListAction
+): Promise<void> {
+  const entry = context.registryDoc.lists.find((l) => l.id === listId);
+  if (!entry || !isListVisibleTo(entry, connection.userId)) {
+    throw new Error('List not accessible');
+  }
+
+  const listDoc = await loadOrGetListDoc(context, listId);
+
+  let nextDoc: Automerge.Doc<ShoppingListDoc>;
+
+  switch (action.type) {
+    case 'add_item':
+      nextDoc = addItem(listDoc, entry, connection.userId, action.label, action.quantity, action.vendor);
+      break;
+    case 'update_item':
+      nextDoc = updateItemLabel(listDoc, entry, connection.userId, action.itemId, action.label);
+      break;
+    case 'set_item_quantity':
+      nextDoc = setItemQuantity(listDoc, entry, connection.userId, action.itemId, action.quantity);
+      break;
+    case 'set_item_vendor':
+      nextDoc = setItemVendor(listDoc, entry, connection.userId, action.itemId, action.vendor);
+      break;
+    case 'set_item_notes':
+      nextDoc = setItemNotes(listDoc, entry, connection.userId, action.itemId, action.notes);
+      break;
+    case 'toggle_item_checked':
+      nextDoc = toggleItemChecked(listDoc, entry, connection.userId, action.itemId, action.checked);
+      break;
+    case 'remove_item':
+      nextDoc = removeItem(listDoc, entry, connection.userId, action.itemId);
+      break;
+    default:
+      throw new Error(`Unsupported list action ${(action as { type: string }).type}`);
+  }
+
+  context.listDocs.set(listId, nextDoc);
+  await saveListDoc(listId, nextDoc);
+}
+
+function handleBulletinAction(
+  connection: Connection,
+  context: ServerContext,
+  action: BulletinAction
+): void {
+  switch (action.type) {
+    case 'add_bulletin':
+      context.bulletinsDoc = addBulletin(
+        context.bulletinsDoc,
+        connection.userId,
+        action.text,
+        action.visibility ?? 'public'
+      );
+      break;
+    case 'edit_bulletin':
+      context.bulletinsDoc = editBulletin(context.bulletinsDoc, connection.userId, action.bulletinId, action.text);
+      break;
+    case 'delete_bulletin':
+      context.bulletinsDoc = deleteBulletin(context.bulletinsDoc, connection.userId, action.bulletinId);
+      break;
+    default:
+      throw new Error(`Unsupported bulletin action ${(action as { type: string }).type}`);
+  }
+}
+
+async function initializeConnection(connection: Connection, context: ServerContext): Promise<void> {
+  try {
+    await subscribe(connection, context, { kind: 'registry' });
+    await subscribe(connection, context, { kind: 'bulletins' });
+    await sendSnapshot(connection, context, { kind: 'registry' });
+    await sendSnapshot(connection, context, { kind: 'bulletins' });
+    flushSync(connection, context, { kind: 'registry' });
+    flushSync(connection, context, { kind: 'bulletins' });
+  } catch (error) {
+    warn('failed to initialize connection', {
+      error: error instanceof Error ? error.message : String(error),
+      userId: connection.userId
+    });
+  }
+}
+
+async function subscribe(
+  connection: Connection,
+  context: ServerContext,
+  descriptor: DocDescriptor
+): Promise<void> {
+  const key = descriptorKey(descriptor);
+  if (!connection.subscriptions.has(key)) {
+    connection.subscriptions.set(key, { descriptor, syncState: Automerge.initSyncState() });
+  }
+
+  // Ensure list doc is cached when subscribing.
+  if (descriptor.kind === 'list') {
+    try {
+      await loadOrGetListDoc(context, descriptor.listId);
+    } catch (error) {
+      warn('failed to load list doc during subscribe', {
+        error: error instanceof Error ? error.message : String(error),
+        listId: descriptor.listId
+      });
+      forgetListDoc(descriptor.listId);
+      throw error;
+    }
+  }
+}
+
+function unsubscribe(connection: Connection, descriptor: DocDescriptor): void {
+  connection.subscriptions.delete(descriptorKey(descriptor));
+}
+
+function broadcastDoc(
+  connections: Set<Connection>,
+  context: ServerContext,
+  descriptor: DocDescriptor
+): void {
+  for (const connection of connections) {
+    if (!connection.subscriptions.has(descriptorKey(descriptor))) {
+      continue;
+    }
+    sendSnapshot(connection, context, descriptor);
+    flushSync(connection, context, descriptor);
+  }
+}
+
+async function sendSnapshot(
+  connection: Connection,
+  context: ServerContext,
+  descriptor: DocDescriptor
+): Promise<void> {
+  switch (descriptor.kind) {
+    case 'registry': {
+      const state = filterRegistryDoc(context.registryDoc, connection.userId);
+      sendJson(connection.socket, { type: 'snapshot', doc: 'registry', state });
+      break;
+    }
+    case 'bulletins': {
+      const state = filterBulletins(context.bulletinsDoc, connection.userId);
+      sendJson(connection.socket, { type: 'snapshot', doc: 'bulletins', state });
+      break;
+    }
+    case 'list': {
+      const entry = context.registryDoc.lists.find((l) => l.id === descriptor.listId);
+      if (!entry || !isListVisibleTo(entry, connection.userId)) {
+        sendJson(connection.socket, {
+          type: 'error',
+          code: 'FORBIDDEN',
+          message: 'No access to list'
+        });
+        return;
+      }
+      let doc = context.listDocs.get(descriptor.listId);
+      if (!doc) {
+        try {
+          doc = await loadOrGetListDoc(context, descriptor.listId);
+        } catch (error) {
+          sendJson(connection.socket, {
+            type: 'error',
+            code: 'NOT_FOUND',
+            message: 'List document unavailable'
+          });
+          return;
+        }
+      }
+      if (!doc) {
+        sendJson(connection.socket, {
+          type: 'error',
+          code: 'NOT_FOUND',
+          message: 'List document unavailable'
+        });
+        return;
+      }
+      const filtered = filterListDoc(doc, entry, connection.userId);
+      if (!filtered) {
+        sendJson(connection.socket, {
+          type: 'error',
+          code: 'FORBIDDEN',
+          message: 'No access to list'
+        });
+        return;
+      }
+      sendJson(connection.socket, { type: 'snapshot', doc: { listId: descriptor.listId }, state: filtered });
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function flushSync(connection: Connection, context: ServerContext, descriptor: DocDescriptor): void {
+  const subscription = connection.subscriptions.get(descriptorKey(descriptor));
+  if (!subscription || connection.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  const doc = resolveDocForDescriptor(context, descriptor);
+  if (!doc) {
+    return;
+  }
+
+  let syncState = subscription.syncState;
+  while (true) {
+    const [nextSyncState, message] = Automerge.generateSyncMessage(doc, syncState);
+    subscription.syncState = nextSyncState;
+    syncState = nextSyncState;
+    if (!message) {
+      break;
+    }
+    const wireDoc =
+      descriptor.kind === 'list' ? { listId: descriptor.listId } : descriptor.kind;
+    sendJson(connection.socket, { type: 'sync', doc: wireDoc, data: toBase64(message) });
+  }
+}
+
+function handleSyncMessage(
+  connection: Connection,
+  context: ServerContext,
+  descriptor: DocDescriptor,
+  base64: string
+): void {
+  const subscription = connection.subscriptions.get(descriptorKey(descriptor));
+  if (!subscription) {
+    throw new Error('Not subscribed to document');
+  }
+  const doc = resolveDocForDescriptor(context, descriptor);
+  if (!doc) {
+    throw new Error('Document unavailable');
+  }
+
+  const messageBytes = fromBase64(base64);
+  const [nextDoc, nextSyncState] = Automerge.receiveSyncMessage(doc, subscription.syncState, messageBytes);
+
+  subscription.syncState = nextSyncState;
+
+  switch (descriptor.kind) {
+    case 'registry':
+      context.registryDoc = nextDoc as Automerge.Doc<ListRegistryDoc>;
+      break;
+    case 'bulletins':
+      context.bulletinsDoc = nextDoc as Automerge.Doc<BulletinDoc>;
+      break;
+    case 'list':
+      context.listDocs.set(descriptor.listId, nextDoc as Automerge.Doc<ShoppingListDoc>);
+      break;
+    default:
+      break;
+  }
+}
+
+function resolveDocForDescriptor(
+  context: ServerContext,
+  descriptor: DocDescriptor
+): Automerge.Doc<ListRegistryDoc | BulletinDoc | ShoppingListDoc> | undefined {
+  switch (descriptor.kind) {
+    case 'registry':
+      return context.registryDoc;
+    case 'bulletins':
+      return context.bulletinsDoc;
+    case 'list':
+      return context.listDocs.get(descriptor.listId);
+    default:
+      return undefined;
+  }
+}
+
+function loadOrGetListDoc(context: ServerContext, listId: ListId): Promise<Automerge.Doc<ShoppingListDoc>> {
+  const cached = context.listDocs.get(listId);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+  return loadListDoc(listId).then((doc) => {
+    context.listDocs.set(listId, doc);
+    return doc;
+  });
 }
 
 function consumeRateLimit(connection: Connection, cost: number): boolean {
@@ -228,22 +583,39 @@ function consumeRateLimit(connection: Connection, cost: number): boolean {
   return false;
 }
 
-function handleSyncMessage(connection: Connection, base64: string): void {
-  let messageBytes: Uint8Array;
-  try {
-    messageBytes = fromBase64(base64);
-  } catch (error) {
-    throw new Error('Invalid sync payload');
+function parseMessage(raw: RawData): ClientMessage {
+  const text = rawDataToString(raw);
+  const parsed = JSON.parse(text) as ClientMessage;
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid payload');
   }
+  return parsed;
+}
 
-  const [nextDoc, nextSyncState] = Automerge.receiveSyncMessage(
-    connection.viewDoc,
-    connection.syncState,
-    messageBytes
-  );
+function parseDocSelector(selector: DocSelector): DocDescriptor {
+  if (selector === 'registry') {
+    return { kind: 'registry' };
+  }
+  if (selector === 'bulletins') {
+    return { kind: 'bulletins' };
+  }
+  if (selector && typeof selector === 'object' && typeof selector.listId === 'string') {
+    return { kind: 'list', listId: selector.listId };
+  }
+  throw new Error('Invalid doc selector');
+}
 
-  connection.syncState = nextSyncState;
-  connection.viewDoc = nextDoc;
+function descriptorKey(descriptor: DocDescriptor): string {
+  switch (descriptor.kind) {
+    case 'registry':
+      return 'registry';
+    case 'bulletins':
+      return 'bulletins';
+    case 'list':
+      return `list:${descriptor.listId}`;
+    default:
+      return 'unknown';
+  }
 }
 
 function rawDataToString(raw: RawData): string {
@@ -259,79 +631,6 @@ function rawDataToString(raw: RawData): string {
   return raw.toString('utf8');
 }
 
-function refreshConnectionView(connection: Connection, doc: Automerge.Doc<BoardDoc>): void {
-  const filtered = filterForUser(doc, connection.userId);
-  connection.viewDoc = Automerge.change(connection.viewDoc, 'refresh_filtered_view', (draft) => {
-    draft.posts.splice(0, draft.posts.length);
-    for (const post of filtered.posts) {
-      draft.posts.push({
-        id: post.id,
-        authorId: post.authorId,
-        text: toAutomergeText(post.text),
-        createdAt: post.createdAt,
-        editedAt: post.editedAt,
-        lastEditedBy: post.lastEditedBy,
-        likes: { ...post.likes },
-        visibility: post.visibility
-      });
-    }
-  });
-}
-
-function broadcastSnapshots(connections: Set<Connection>, doc: Automerge.Doc<BoardDoc>): void {
-  for (const connection of connections) {
-    if (connection.socket.readyState !== WebSocket.OPEN) {
-      continue;
-    }
-    sendSnapshot(connection, doc);
-  }
-}
-
-function broadcastSyncMessages(
-  connections: Set<Connection>,
-  doc: Automerge.Doc<BoardDoc>,
-  skip?: Connection
-): void {
-  for (const connection of connections) {
-    if (connection === skip) {
-      continue;
-    }
-    refreshConnectionView(connection, doc);
-    sendSyncMessages(connection);
-  }
-}
-
-function sendSnapshot(connection: Connection, doc: Automerge.Doc<BoardDoc>): void {
-  if (connection.socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  const state = filterForUser(doc, connection.userId);
-  sendJson(connection.socket, { type: 'snapshot', state });
-}
-
-function sendSyncMessages(connection: Connection): void {
-  if (connection.socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  let syncState = connection.syncState;
-  while (true) {
-    const [nextSyncState, message] = Automerge.generateSyncMessage(connection.viewDoc, syncState);
-    connection.syncState = nextSyncState;
-    syncState = nextSyncState;
-    if (!message) {
-      break;
-    }
-    sendJson(connection.socket, { type: 'sync', data: toBase64(message) });
-  }
-}
-
-function sendJson(socket: WebSocket, payload: unknown): void {
-  if (socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  socket.send(JSON.stringify(payload));
-}
-
 function toBase64(data: Uint8Array): string {
   return Buffer.from(data).toString('base64');
 }
@@ -340,10 +639,9 @@ function fromBase64(data: string): Uint8Array {
   return Buffer.from(data, 'base64');
 }
 
-function toAutomergeText(value: string): Automerge.Text {
-  const text = new Automerge.Text();
-  if (value.length > 0) {
-    text.insertAt(0, ...value);
+function sendJson(socket: WebSocket, payload: unknown): void {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return;
   }
-  return text;
+  socket.send(JSON.stringify(payload));
 }

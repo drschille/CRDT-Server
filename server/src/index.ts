@@ -1,9 +1,10 @@
 import http from 'node:http';
 import express from 'express';
-import * as Automerge from '@automerge/automerge';
 import { createWSServer } from './ws.js';
-import { loadDoc } from './crdt.js';
+import { loadBulletinDoc, loadRegistryDoc } from './crdt.js';
 import { info, error } from './logger.js';
+import * as Automerge from '@automerge/automerge';
+import type { ShoppingListDoc } from './types.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
 
@@ -11,8 +12,15 @@ async function main() {
   const app = express();
   const server = http.createServer(app);
 
-  const doc = await loadDoc();
-  const docRef = { doc };
+  const registryDoc = await loadRegistryDoc();
+  const bulletinsDoc = await loadBulletinDoc();
+  const listDocs = new Map<string, Automerge.Doc<ShoppingListDoc>>();
+
+  const context = {
+    registryDoc,
+    bulletinsDoc,
+    listDocs
+  };
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
@@ -23,10 +31,16 @@ async function main() {
       res.status(404).json({ error: 'Not found' });
       return;
     }
-    res.json({ state: Automerge.toJS(docRef.doc) });
+    res.json({
+      registry: Automerge.toJS(context.registryDoc),
+      bulletins: Automerge.toJS(context.bulletinsDoc),
+      lists: Object.fromEntries(
+        Array.from(context.listDocs.entries()).map(([id, doc]) => [id, Automerge.toJS(doc)])
+      )
+    });
   });
 
-  createWSServer(server, docRef);
+  createWSServer(server, context);
 
   server.listen(PORT, () => {
     info('server listening', { port: PORT });

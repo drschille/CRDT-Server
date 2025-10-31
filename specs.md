@@ -1,16 +1,19 @@
-# spec.md — Centralized CRDT Server (TypeScript) for “Bulletin Board”
+# spec.md — Centralized CRDT Server (TypeScript) for “Collaborative Shopping”
 
 ## 1) Goal (MVP)
 
-Build a **TypeScript Node.js** server that maintains a **centralized CRDT** for a shared JSON “bulletin board” and syncs it to clients (your Kotlin Android app + any web dev tools).
+Build a **TypeScript Node.js** server that maintains **collaborative shopping / wish lists** and a **separate bulletin board** using Automerge. Each shopping list lives in its own Automerge document, while the bulletin board has an independent document. A lightweight registry document keeps track of list metadata so clients can discover and subscribe to the lists they care about.
 
-* **Single shared document**: `BoardDoc = { posts: Post[] }`
-* **Eventual consistency**: implemented server-side using **Automerge v2**.
+* **Documents**:
+  * `ListRegistryDoc` — canonical index of lists (id, name, owner, collaborators, visibility, etc.).
+  * `ShoppingListDoc` — one per list; stores the items for that list only.
+  * `BulletinDoc` — holds announcement posts, independent from shopping lists.
+* **Eventual consistency**: implemented server-side using **Automerge v3**.
 * **Transport**: WebSocket for realtime; minimal REST for health/debug.
 * **Auth (optional for MVP)**: anonymous or simple bearer token.
 * **Clients**: Minimalistic with **Automerge replica**.
 
-> Rationale: Server and all connected clients each hold an **Automerge replica** of the shared document. Clients apply local **domain actions** (`add_post`, `like_post`, etc.) optimistically to their replica, then exchange Automerge sync messages with the server to converge. The server remains the authoritative persistence and privacy filter (only it stores private data for all users) and still broadcasts filtered **projections** as snapshots for convenience.
+> Rationale: The server owns the canonical Automerge replicas for the registry, each shopping list, and the bulletin board. Clients subscribe only to the documents they are authorized to see, reducing payload size for large deployments. Users apply local **domain actions** (`create_list`, `add_item`, `set_item_quantity`, etc.) optimistically to the relevant replica, then exchange Automerge sync messages with the server to converge. Bulletin announcements remain available even if no lists are shared between users.
 
 ---
 
@@ -18,7 +21,7 @@ Build a **TypeScript Node.js** server that maintains a **centralized CRDT** for 
 
 * **Runtime**: Node.js ≥ 20
 * **Lang**: TypeScript
-* **CRDT**: `@automerge/automerge` v2
+* **CRDT**: `@automerge/automerge` v3
 * **WebSocket**: `ws`
 * **REST**: `express` (health + debug only)
 * **Persistence**: write `automerge.save(doc)` to `data/board.bin` (atomic write)
@@ -31,40 +34,108 @@ Build a **TypeScript Node.js** server that maintains a **centralized CRDT** for 
 ## 3) Data Model
 
 ```ts
-type PostId = string;   // UUID v4 (server-side)
-type UserId = string;   // From auth header or connection param; "anon-<connId>" if missing
+type ListId = string;      // UUID v4 (server-side)
+type ItemId = string;      // UUID v4 (per list)
+type BulletinId = string;  // UUID v4 for bulletins
+type UserId = string;      // From auth header or connection param; "anon-<connId>" if missing
 
 type Visibility = 'public' | 'private';
 
-interface Post {
-  id: PostId;
+// 3.1 Registry document -----------------------------------------------------
+
+interface ListRegistryEntry {
+  id: ListId;
+  ownerId: UserId;
+  name: Automerge.Text;
+  createdAt: string;
+  updatedAt?: string;
+  visibility: Visibility;              // public lists discoverable by others; private lists scoped to owner + collaborators
+  collaborators: Record<UserId, true>; // editors besides owner
+  archived?: boolean;
+}
+
+interface ListRegistryDoc {
+  lists: ListRegistryEntry[];
+}
+
+// Snapshot representation for convenience:
+interface FilteredRegistryEntry {
+  id: ListId;
+  ownerId: UserId;
+  name: string;
+  createdAt: string;
+  updatedAt?: string;
+  visibility: Visibility;
+  collaborators: Record<UserId, true>;
+  archived?: boolean;
+}
+
+// 3.2 Shopping list document ------------------------------------------------
+
+interface ListItem {
+  id: ItemId;
+  label: Automerge.Text;
+  createdAt: string;
+  addedBy: UserId;
+  quantity?: string;      // free-form (e.g., "3", "2 packs")
+  vendor?: string;        // optional vendor / store hint
+  notes?: Automerge.Text; // optional detail text
+  checked?: boolean;      // toggle for purchased items
+}
+
+interface ShoppingListDoc {
+  listId: ListId;
+  items: ListItem[];
+}
+
+interface FilteredItem {
+  id: ItemId;
+  label: string;
+  createdAt: string;
+  addedBy: UserId;
+  quantity?: string;
+  vendor?: string;
+  notes?: string;
+  checked?: boolean;
+}
+
+interface FilteredListDoc {
+  listId: ListId;
+  items: FilteredItem[];
+}
+
+// 3.3 Bulletin document -----------------------------------------------------
+
+interface Bulletin {
+  id: BulletinId;
   authorId: UserId;
-  text: Automerge.Text;        // canonical doc stores CRDT text
-  createdAt: string;           // ISO8601
-  editedAt?: string;           // ISO8601
-  likes: Record<UserId, true>; // set-as-map
+  text: Automerge.Text;
+  createdAt: string;
+  editedAt?: string;
   visibility: Visibility;
 }
 
-// Snapshots expose a plain string for client convenience:
-interface FilteredPost {
-  id: PostId;
+interface BulletinDoc {
+  bulletins: Bulletin[];
+}
+
+interface FilteredBulletin {
+  id: BulletinId;
   authorId: UserId;
   text: string;
   createdAt: string;
   editedAt?: string;
-  likes: Record<UserId, true>;
   visibility: Visibility;
 }
-
-// Privacy/editing rules:
-// - `public` posts can be edited live by any connected user.
-// - `private` posts remain visible and editable only to their author.
-
-interface BoardDoc {
-  posts: Post[];
-}
 ```
+
+### Privacy/editing rules
+
+* `public` lists are visible in the registry to everyone; `private` lists appear only to their `ownerId` and `collaborators`.
+* Access to a list’s items requires visibility in the registry (owner or collaborator for private lists).
+* Each list document enforces that only the owner or collaborators may mutate items.
+* The bulletin board is independent: `public` bulletins are visible to all users, `private` bulletins remain visible only to the author.
+* Archiving a list marks it hidden but leaves historical data intact (stretch goal).
 
 ---
 
@@ -80,17 +151,40 @@ ws://<HOST>/ws?token=<JWT-optional>
 
 ### 4.2 Client → Server messages (JSON)
 
+Clients first identify themselves, then subscribe to one or more documents. Sync traffic is scoped per document.
+
 ```ts
 type ClientMsg =
   | { type: 'hello'; clientVersion: string }
-  | { type: 'add_post'; text: string; visibility?: Visibility }
-  | { type: 'edit_post'; id: PostId; text: string }
-  | { type: 'edit_post_live'; id: PostId; index: number; deleteCount: number; text: string }
-  | { type: 'delete_post'; id: PostId }
-  | { type: 'like_post'; id: PostId }
-  | { type: 'unlike_post'; id: PostId }
-  | { type: 'request_full_state' } // debugging
-  | { type: 'sync', data: Uint8Array }; // raw Automerge sync message bytes (base64 when over JSON)
+  | { type: 'subscribe'; doc: 'registry' | 'bulletins' | { listId: ListId } }
+  | { type: 'unsubscribe'; doc: 'registry' | 'bulletins' | { listId: ListId } }
+  | { type: 'registry_action'; action: RegistryAction }
+  | { type: 'list_action'; listId: ListId; action: ListAction }
+  | { type: 'bulletin_action'; action: BulletinAction }
+  | { type: 'sync'; doc: 'registry' | 'bulletins' | { listId: ListId }; data: Uint8Array }
+  | { type: 'request_full_state'; doc?: 'registry' | 'bulletins' | { listId: ListId } };
+
+type RegistryAction =
+  | { type: 'create_list'; name: string; visibility?: Visibility; collaborators?: UserId[] }
+  | { type: 'rename_list'; listId: ListId; name: string }
+  | { type: 'update_list_visibility'; listId: ListId; visibility: Visibility }
+  | { type: 'set_collaborators'; listId: ListId; collaborators: UserId[] }
+  | { type: 'archive_list'; listId: ListId }
+  | { type: 'delete_list'; listId: ListId }; // hard delete (optional)
+
+type ListAction =
+  | { type: 'add_item'; label: string; quantity?: string; vendor?: string }
+  | { type: 'update_item'; itemId: ItemId; label: string }
+  | { type: 'set_item_quantity'; itemId: ItemId; quantity?: string }
+  | { type: 'set_item_vendor'; itemId: ItemId; vendor?: string }
+  | { type: 'set_item_notes'; itemId: ItemId; notes?: string }
+  | { type: 'toggle_item_checked'; itemId: ItemId; checked: boolean }
+  | { type: 'remove_item'; itemId: ItemId };
+
+type BulletinAction =
+  | { type: 'add_bulletin'; text: string; visibility?: Visibility }
+  | { type: 'edit_bulletin'; bulletinId: BulletinId; text: string }
+  | { type: 'delete_bulletin'; bulletinId: BulletinId };
 ```
 
 ### 4.3 Server → Client messages (JSON)
@@ -98,19 +192,18 @@ type ClientMsg =
 ```ts
 type ServerMsg =
   | { type: 'welcome'; userId: UserId }
-  | { type: 'snapshot'; state: FilteredBoard }           // full projection for this user
-  | { type: 'delta'; state: FilteredBoard }              // minimal: only changed posts if time permits
-  | { type: 'sync', data: Uint8Array }                   // raw Automerge sync response
+  | { type: 'snapshot'; doc: 'registry' | 'bulletins' | { listId: ListId }; state: unknown }
+  | { type: 'sync'; doc: 'registry' | 'bulletins' | { listId: ListId }; data: Uint8Array }
   | { type: 'error'; code: string; message: string };
 ```
 
-**FilteredBoard** = `BoardDoc` filtered for that user:
+Snapshots are tailored to the requesting user:
 
-* Include **all public posts**.
-* Include **private posts only if `authorId === userId`**.
-* Never send other users’ private posts.
+* Registry snapshot → `FilteredRegistryEntry[]`.
+* List snapshot → `FilteredListDoc` for the requested list.
+* Bulletin snapshot → `FilteredBulletin[]`.
 
-> MVP: Always send `snapshot` after each change (simple & robust). “Delta” is a stretch goal.
+> MVP: Always send `snapshot` after each successful action (simple & robust). Incremental deltas per document remain a stretch goal.
 
 ---
 
@@ -118,84 +211,106 @@ type ServerMsg =
 
 1. **Startup**
 
-  * Load persisted canonical replica: if `data/board.bin` exists, `Automerge.load()`; else create `Automerge.from<BoardDoc>({ posts: [] })`.
-  * Start Express (`/healthz`, `/debug/state`).
-  * Start WS server and accept connections.
+   * Load the registry document (e.g., `data/registry.bin`), creating an empty one if missing.
+   * Load the bulletin document (`data/bulletins.bin`).
+   * Discover persisted list documents under `data/lists/<listId>.bin`; lazily load on first subscription to avoid long boot times.
+   * Start Express (`/healthz`, `/debug/state`).
+   * Start WS server and accept connections.
 
 2. **On connection (handshake)**
 
-  * Resolve `userId`.
-  * Initialize an in-memory sync state object per connection (`Automerge.getSyncState()`).
-  * Send `{ type: 'welcome', userId }`.
-  * Generate initial sync message (if any) via `Automerge.generateSyncMessage(serverDoc, syncState)` and send `{ type: 'sync', data: <base64> }`.
-  * Optionally also send a convenience `{ type: 'snapshot', state: filter(serverDoc, userId) }` for fast UI bootstrap (clients can render while CRDT catches up).
+   * Resolve `userId`.
+   * Initialize sync state maps per connection: `{ registry: SyncState; bulletins?: SyncState; lists: Map<ListId, SyncState> }`.
+   * Send `{ type: 'welcome', userId }`.
+   * Optionally auto-subscribe to registry and bulletin docs for faster UX.
 
-3. **On client sync message**
+3. **Subscriptions**
 
-  * Decode base64 → `Uint8Array`.
-  * Call `Automerge.receiveSyncMessage(serverDoc, syncState, bytes)`; if it mutates the server doc (returns a new doc), persist and update reference.
-  * After applying, attempt another `generateSyncMessage`; send if non-null.
-  * Finally, may send an updated `snapshot` (optional if client fully relies on its local replica state).
+   * `subscribe` message triggers server to:
+     * Authorize: ensure user can see requested document (for lists, verify registry entry + collaborators).
+     * Attach connection to the document’s listener set.
+     * Send immediate `snapshot` plus any pending sync messages (`generateSyncMessage`).
+   * `unsubscribe` removes connection from the listener set; optionally persist sync state for fast re-entry.
 
-4. **On domain action (client → server)**
+4. **On client sync message**
 
-  * Validate payload (type, required fields, length, permissions).
-  * Apply change: one `Automerge.change(serverDoc, 'action:<type>', draft => { ... })`.
-    * `add_post`: push new `Post` (server authoritative UUID).
-    * `edit_post`: replace entire `text` or (if clients send granular deltas) integrate into `Automerge.Text`.
-    * `edit_post_live`: apply `{ index, deleteCount, text }` into `Automerge.Text.splice(...)` semantics.
-    * `delete_post`: author only.
-    * `like_post` / `unlike_post`: toggle set membership.
-  * Persist (`writeFileAtomic`).
-  * For every connection: update its sync state and attempt a `generateSyncMessage`; send if available (keeps replicas converging). Also send personalized `snapshot` for UI convenience.
+   * Determine target document (registry, bulletins, or specific list).
+   * Decode base64 → `Uint8Array`.
+   * Call `Automerge.receiveSyncMessage(doc, syncState, bytes)`; store new doc and sync state if mutated.
+   * Emit follow-up sync messages until `null`.
 
-5. **Filtering (privacy)**
+5. **On domain action (client → server)**
 
-  ```ts
-  function filter(doc: BoardDoc, userId: UserId): FilteredBoard {
-    return {
-      posts: doc.posts
-        .filter(p => p.visibility === 'public' || p.authorId === userId)
-        .map(p => ({
-          id: p.id,
-          authorId: p.authorId,
-          text: p.text.toString(),
-          createdAt: p.createdAt,
-          editedAt: p.editedAt,
-          lastEditedBy: p.lastEditedBy,
-          likes: p.likes,
-          visibility: p.visibility
-        }))
-    };
-  }
-  ```
+   * Validate payload (shape, string lengths, collaborator permissions).
+   * Registry actions mutate the registry doc only; list creation also spawns a new list doc persisted at `data/lists/<id>.bin`.
+   * List actions mutate the corresponding list doc after verifying edit permissions via registry entry.
+   * Bulletin actions mutate the bulletin doc.
+   * Persist touched documents with `writeFileAtomic`.
+   * Broadcast:
+     * Updated registry snapshot to registry subscribers.
+     * Updated list snapshot to subscribers of that list.
+     * Updated bulletin snapshot to bulletin subscribers.
+     * Run sync loops for each affected document.
 
-6. **Validation & Limits**
+6. **Filtering (privacy)**
 
-   * `text` max 2,000 chars.
-   * Post count cap (e.g., 2,000) to keep memory bounded.
-   * Rate-limit per connection (simple token bucket in memory).
+   ```ts
+   function filterRegistry(doc: ListRegistryDoc, userId: UserId): FilteredRegistryEntry[] {
+     return doc.lists
+       .filter((list) => list.visibility === 'public' || list.ownerId === userId || Boolean(list.collaborators[userId]))
+       .map(toFilteredRegistryEntry);
+   }
 
-7. **Errors**
+   function filterListDoc(listDoc: ShoppingListDoc, registryEntry: ListRegistryEntry, userId: UserId): FilteredListDoc | null {
+     if (registryEntry.visibility === 'public' || registryEntry.ownerId === userId || registryEntry.collaborators[userId]) {
+       return {
+         listId: listDoc.listId,
+         items: listDoc.items.map(toFilteredItem)
+       };
+     }
+     return null;
+   }
+
+   function filterBulletins(doc: BulletinDoc, userId: UserId): FilteredBulletin[] {
+     return doc.bulletins
+       .filter((b) => b.visibility === 'public' || b.authorId === userId)
+       .map(toFilteredBulletin);
+   }
+   ```
+
+7. **Validation & Limits**
+
+   * List name max 200 chars; item label max 200 chars.
+   * Notes text max 2,000 chars.
+   * Per-user list cap (e.g., 200 lists) enforced in registry.
+   * Per-list item cap (e.g., 1,000 items) enforced per list doc.
+   * Optional vendor/quantity strings max 200 chars.
+   * Rate-limit per connection (token bucket) to avoid flooding across all documents.
+
+8. **Errors**
 
    * Send `{ type: 'error', code, message }` on invalid input or forbidden action.
-   * Keep connection open unless abuse is detected.
+   * Keep connection open unless abusive; consider temporary bans for repeated violations.
 
 ---
 
 ## 6) REST Endpoints (debug/minimal)
 
 * `GET /healthz` → `{ ok: true }`
-* `GET /debug/state` (dev only, guarded by `NODE_ENV !== 'production'`) → returns full `BoardDoc` JSON
+* `GET /debug/state` (dev only, guarded by `NODE_ENV !== 'production'`) → returns full `WishlistDoc` JSON
 
 ---
 
 ## 7) Persistence
 
 * Directory: `data/`
-* File: `board.bin` (binary from `Automerge.save`).
-* Use atomic write (write temp + rename).
-* On crash/restart, load and continue.
+* Files:
+  * `registry.bin` — registry document.
+  * `bulletins.bin` — bulletin board document.
+  * `lists/<listId>.bin` — one file per shopping list.
+* Use atomic write (write temp + rename) for every document update.
+* Maintain a lightweight manifest (`lists/index.json` or rely on registry doc) to detect orphaned list files.
+* On crash/restart, load registry + bulletins eagerly; load list docs lazily when first requested.
 
 ---
 
@@ -253,19 +368,20 @@ server/
 
 ## 11) Acceptance Criteria (MVP – Multi‑Replica)
 
-* Start server, connect 2+ clients via WS; each converges replicas via `sync` messages.
-* Client A adds a **public** post locally; sends domain action; all clients converge and display it.
-* Client A adds a **private** post; only A’s replica contains it; other replicas never receive it.
-* Client B cannot edit/delete A’s private posts; can like/unlike A’s public posts and change appears for all.
-* Restart server → persisted state loads and subsequent sync brings clients back in line.
-* Basic rate limit prevents flooding of domain actions & sync messages.
-* Offline scenario: Client goes offline, performs local edits (at least add + text edit), reconnects, and after sync convergence the server persists merged state without conflicts.
+* Start server, connect 2+ clients via WS; each converges the registry + any subscribed documents via `sync` messages.
+* Client A creates a **public shopping list**; registry updates broadcast; Client B subscribes to the new list and sees items after convergence.
+* Client A invites Client B as a collaborator; both subscribe to the list doc and append items with matching results.
+* Client A creates a **private wish list**; only A (and explicit collaborators) can subscribe to and view the list document.
+* Bulletins posted as `public` are visible to all subscribers of the bulletin doc; `private` bulletins remain scoped to the author.
+* Restart server → registry, bulletins, and individual list docs persist and reload; clients resubscribe and converge.
+* Basic rate limit prevents flooding across registry/list/bulletin actions and sync messages.
+* Offline scenario: Client goes offline, edits a list doc locally (add items + change notes), reconnects, and merges without conflicts once sync resumes.
 
 ---
 
 ## 12) Stretch Goals (nice if time permits)
 
-* **Per-message deltas** (send only changed posts).
+* **Per-message deltas** (send only changed lists/items/bulletins).
 * **Optimistic UI hints**: include a server op id/echo.
 * **Replay log** of actions (append-only file).
 * **Admin purge** endpoint.
@@ -282,22 +398,22 @@ server/
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as Automerge from '@automerge/automerge';
-import { BoardDoc } from './types';
+import { WishlistDoc } from './types.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
-const DATA_FILE = path.join(DATA_DIR, 'board.bin');
+const DATA_FILE = path.join(DATA_DIR, 'wishlist.bin');
 
-export async function loadDoc(): Promise<Automerge.Doc<BoardDoc>> {
+export async function loadDoc(): Promise<Automerge.Doc<WishlistDoc>> {
   try {
     const buf = await fs.readFile(DATA_FILE);
-    return Automerge.load<BoardDoc>(buf);
+    return Automerge.load<WishlistDoc>(buf);
   } catch {
     await fs.mkdir(DATA_DIR, { recursive: true });
-    return Automerge.from<BoardDoc>({ posts: [] });
+    return Automerge.from<WishlistDoc>({ lists: [], bulletins: [] });
   }
 }
 
-export async function saveDoc(doc: Automerge.Doc<BoardDoc>) {
+export async function saveDoc(doc: Automerge.Doc<WishlistDoc>) {
   const bin = Automerge.save(doc);
   const tmp = DATA_FILE + '.tmp';
   await fs.writeFile(tmp, bin);
@@ -309,79 +425,188 @@ export async function saveDoc(doc: Automerge.Doc<BoardDoc>) {
 
 ```ts
 import * as Automerge from '@automerge/automerge';
-import { BoardDoc, Visibility, UserId, PostId } from './types';
+import { WishlistDoc, Visibility, UserId, ListId, ItemId } from './types.js';
 import { randomUUID } from 'node:crypto';
 
-export function addPost(doc: Automerge.Doc<BoardDoc>, userId: UserId, text: string, visibility: Visibility = 'public') {
-  return Automerge.change(doc, 'add_post', d => {
-    d.posts.push({
+const MAX_NAME = 200;
+const MAX_TEXT = 2000;
+
+export function createList(
+  doc: Automerge.Doc<WishlistDoc>,
+  userId: UserId,
+  name: string,
+  visibility: Visibility = 'private',
+  collaborators: UserId[] = []
+): Automerge.Doc<WishlistDoc> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Name required');
+  if (trimmed.length > MAX_NAME) throw new Error('Name too long');
+
+  const uniqueCollabs = Array.from(new Set(collaborators.filter((id) => id && id !== userId)));
+
+  return Automerge.change(doc, 'create_list', (draft) => {
+    draft.lists.push({
       id: randomUUID(),
-      authorId: userId,
-      text,
+      ownerId: userId,
+      name: toText(trimmed),
       createdAt: new Date().toISOString(),
-      editedAt: undefined,
-      likes: {},
-      visibility
+      updatedAt: undefined,
+      visibility,
+      collaborators: Object.fromEntries(uniqueCollabs.map((id) => [id, true])),
+      items: []
     });
   });
 }
 
-// edit_post, delete_post, like/unlike: similar pattern with guard checks.
+export function addItem(
+  doc: Automerge.Doc<WishlistDoc>,
+  listId: ListId,
+  userId: UserId,
+  label: string,
+  quantity?: string,
+  vendor?: string
+): Automerge.Doc<WishlistDoc> {
+  const trimmed = label.trim();
+  if (!trimmed) throw new Error('Label required');
+  if (trimmed.length > MAX_NAME) throw new Error('Label too long');
+
+  return Automerge.change(doc, 'add_item', (draft) => {
+    const list = draft.lists.find((l) => l.id === listId);
+    if (!list) throw new Error('List not found');
+    ensureCanEdit(list, userId);
+    list.items.push({
+      id: randomUUID(),
+      label: toText(trimmed),
+      createdAt: new Date().toISOString(),
+      addedBy: userId,
+      quantity: quantity?.slice(0, MAX_NAME),
+      vendor: vendor?.slice(0, MAX_NAME),
+      notes: undefined,
+      checked: false
+    });
+    list.updatedAt = new Date().toISOString();
+  });
+}
+
+export function setItemNotes(
+  doc: Automerge.Doc<WishlistDoc>,
+  listId: ListId,
+  itemId: ItemId,
+  userId: UserId,
+  notes: string | undefined
+): Automerge.Doc<WishlistDoc> {
+  if (notes && notes.length > MAX_TEXT) throw new Error('Notes too long');
+
+  return Automerge.change(doc, 'set_item_notes', (draft) => {
+    const list = draft.lists.find((l) => l.id === listId);
+    if (!list) throw new Error('List not found');
+    ensureCanEdit(list, userId);
+    const item = list.items.find((i) => i.id === itemId);
+    if (!item) throw new Error('Item not found');
+    item.notes = notes ? toText(notes) : undefined;
+    list.updatedAt = new Date().toISOString();
+  });
+}
+
+function ensureCanEdit(list: WishlistDoc['lists'][number], userId: UserId): void {
+  if (list.ownerId === userId) return;
+  if (list.collaborators[userId]) return;
+  throw new Error('Forbidden');
+}
+
+function toText(value: string): Automerge.Text {
+  const text = new Automerge.Text();
+  if (value) {
+    text.insertAt(0, ...value);
+  }
+  return text;
+}
 ```
 
 **`src/ws.ts`**
 
 ```ts
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
 import * as Automerge from '@automerge/automerge';
-import { filterForUser } from './filter';
-import { addPost /* ... */ } from './actions';
-import { saveDoc } from './crdt';
-import { BoardDoc, UserId } from './types';
+import { filterForUser } from './filter.js';
+import { createList, addItem /* ... */ } from './actions.js';
+import { saveDoc } from './crdt.js';
+import { WishlistDoc, UserId } from './types.js';
 
-type Conn = { userId: UserId; ws: import('ws') };
+interface Connection {
+  userId: UserId;
+  ws: WebSocket;
+  syncState: Automerge.SyncState;
+}
 
-export function createWSServer(server: import('http').Server, docRef: { doc: Automerge.Doc<BoardDoc> }) {
+export function createWSServer(server: import('http').Server, docRef: { doc: Automerge.Doc<WishlistDoc> }) {
   const wss = new WebSocketServer({ server, path: '/ws' });
-  const conns = new Set<Conn>();
+  const connections = new Set<Connection>();
 
   wss.on('connection', (ws, req) => {
-    const userId = resolveUserId(req); // anon if needed
-    const conn: Conn = { userId, ws };
-    conns.add(conn);
+    const userId = resolveUserId(req);
+    const connection: Connection = { userId, ws, syncState: Automerge.initSyncState() };
+    connections.add(connection);
 
-    ws.send(JSON.stringify({ type: 'welcome', userId }));
-    ws.send(JSON.stringify({ type: 'snapshot', state: filterForUser(docRef.doc, userId) }));
+    sendJson(ws, { type: 'welcome', userId });
+    sendJson(ws, { type: 'snapshot', state: filterForUser(docRef.doc, userId) });
+    flushSync(connection, docRef.doc);
 
-    ws.on('message', async raw => {
+    ws.on('message', async (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
-        let next = docRef.doc;
-
-        if (msg.type === 'add_post') {
-          next = addPost(docRef.doc, userId, String(msg.text ?? ''), msg.visibility ?? 'public');
+        if (msg.type === 'sync') {
+          const [nextDoc, nextState] = Automerge.receiveSyncMessage(docRef.doc, connection.syncState, msg.data);
+          docRef.doc = nextDoc;
+          connection.syncState = nextState;
+          flushSync(connection, docRef.doc);
+          return;
         }
-        // ... handle other actions with validation & guards
 
-        if (next !== docRef.doc) {
-          docRef.doc = next;
-          await saveDoc(docRef.doc);
-          // broadcast personalized snapshots
-          for (const c of conns) {
-            if (c.ws.readyState === c.ws.OPEN) {
-              c.ws.send(JSON.stringify({ type: 'snapshot', state: filterForUser(docRef.doc, c.userId) }));
-            }
-          }
+        switch (msg.type) {
+          case 'create_list':
+            docRef.doc = createList(docRef.doc, userId, msg.name, msg.visibility, msg.collaborators);
+            break;
+          case 'add_item':
+            docRef.doc = addItem(docRef.doc, msg.listId, userId, msg.label, msg.quantity, msg.vendor);
+            break;
+          // … other domain actions …
+          default:
+            throw new Error(`Unsupported message ${msg.type}`);
         }
-      } catch (e: any) {
-        ws.send(JSON.stringify({ type: 'error', code: 'BAD_REQUEST', message: e?.message ?? 'invalid message' }));
+
+        await saveDoc(docRef.doc);
+        for (const conn of connections) {
+          if (conn.ws.readyState !== WebSocket.OPEN) continue;
+          sendJson(conn.ws, { type: 'snapshot', state: filterForUser(docRef.doc, conn.userId) });
+          flushSync(conn, docRef.doc);
+        }
+      } catch (error) {
+        sendJson(ws, {
+          type: 'error',
+          code: 'BAD_REQUEST',
+          message: error instanceof Error ? error.message : 'invalid message'
+        });
       }
     });
 
-    ws.on('close', () => conns.delete(conn));
+    ws.on('close', () => connections.delete(connection));
   });
+}
 
-  return wss;
+function flushSync(connection: Connection, doc: Automerge.Doc<WishlistDoc>) {
+  while (true) {
+    const [nextState, message] = Automerge.generateSyncMessage(doc, connection.syncState);
+    connection.syncState = nextState;
+    if (!message) break;
+    sendJson(connection.ws, { type: 'sync', data: message });
+  }
+}
+
+function sendJson(ws: WebSocket, payload: unknown) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+  }
 }
 ```
 
@@ -389,13 +614,13 @@ export function createWSServer(server: import('http').Server, docRef: { doc: Aut
 
 ## 14) How Android & Web Clients Use It (multi-replica contract)
 
-* Maintain a local Automerge replica (`clientDoc`).
-* On connect: open WS to `/ws`; receive `welcome` then `sync` messages until convergence (apply via `receiveSyncMessage`). Optionally render initial `snapshot` for faster UI.
-* Apply user edits optimistically: run `Automerge.change(clientDoc, ...)` immediately, update UI, enqueue domain action JSON to server for validation & persistence.
-* Periodically (or after each local change) attempt to produce a sync message: `generateSyncMessage(clientDoc, syncState)` and send `{ type: 'sync', data }` (base64).
-* On server `sync` replies, integrate and re-render only the affected posts.
-* Offline: keep applying changes locally; buffer outgoing `sync` + domain actions; flush when connection restores.
-* Privacy: clients only store posts they are allowed to see (received via snapshots or sync convergence). Private posts of others never materialize locally.
+* Maintain local Automerge replicas per subscribed document (registry, bulletins, each list).
+* On connect: open WS to `/ws`; receive `welcome`; immediately subscribe to registry + bulletins (and remembered list IDs). Apply `sync` messages via `receiveSyncMessage` until convergence. Render initial `snapshot` for faster UI.
+* Apply user edits optimistically: mutate the specific document replica, update UI, then send the appropriate `*_action` message; also send sync payloads when available.
+* Periodically (or after each change) run `generateSyncMessage(docReplica, docSyncState)` and send `{ type: 'sync', doc, data }` (base64).
+* On server `sync` replies, integrate only the affected document and re-render relevant views.
+* Offline: keep applying changes locally per document; buffer outgoing `sync` + `*_action` messages; flush when connection restores.
+* Privacy: clients only subscribe to lists authorized by the registry filter; private lists and bulletins of others are never delivered.
 
 ---
 
@@ -404,6 +629,6 @@ export function createWSServer(server: import('http').Server, docRef: { doc: Aut
 * No peer-to-peer client sync (always via server).
 * No advanced delta compression beyond Automerge sync protocol.
 * No replay log UI (storage may exist as stretch goal only).
-* No multi-document support.
+* No cross-list aggregate analytics (beyond registry metadata).
 
 ---
