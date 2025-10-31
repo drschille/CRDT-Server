@@ -350,6 +350,9 @@ function ensureListEditable(entry: ListRegistryEntry, userId: UserId): void {
   if (entry.archived) {
     throw new Error('List is archived');
   }
+  if (entry.visibility === 'public') {
+    return;
+  }
   ensureCanEditMetadata(entry, userId);
 }
 

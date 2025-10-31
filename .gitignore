@@ -6,3 +6,4 @@ dist
 data/board.bin
 data/board.bin.tmp
 *.tsbuildinfo
+server/data/

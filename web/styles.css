@@ -336,6 +336,25 @@ button:not(:disabled):hover {
   font-weight: 600;
 }
 
+.item-label--editable {
+  cursor: text;
+}
+
+.item-label--editable:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.item-label-input {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .item-label.checked {
   text-decoration: line-through;
   color: #94a3b8;
@@ -347,6 +366,36 @@ button:not(:disabled):hover {
   display: flex;
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+.item-meta__entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.item-meta__entry--editable {
+  cursor: text;
+}
+
+.item-meta__entry--editable:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.item-meta__entry--empty {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.item-meta-input {
+  font: inherit;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  width: auto;
+  min-width: 4rem;
+  box-sizing: border-box;
 }
 
 .item-actions {

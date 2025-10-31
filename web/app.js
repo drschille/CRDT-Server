@@ -354,6 +354,7 @@ function renderActiveList() {
   if (!activeListId) {
     activeListNameEl.textContent = 'Select a list';
     activeListMetaEl.textContent = '';
+    listEmptyEl.textContent = 'No list selected.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
     return;
@@ -363,6 +364,7 @@ function renderActiveList() {
   if (!entry) {
     activeListNameEl.textContent = 'List unavailable';
     activeListMetaEl.textContent = '';
+    listEmptyEl.textContent = 'List unavailable.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
     return;
@@ -374,17 +376,25 @@ function renderActiveList() {
   }`;
 
   const listState = listStates.get(activeListId);
-  if (!listState || listState.items.length === 0) {
+  if (!listState) {
+    listEmptyEl.textContent = 'Loading list...';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
     itemsContainer.innerHTML = '';
     return;
   }
 
-  listEmptyEl.classList.add('hidden');
   listContentEl.classList.remove('hidden');
-
   itemsContainer.innerHTML = '';
+
+  if (listState.items.length === 0) {
+    listEmptyEl.textContent = 'No items yet. Use "Add" to create one.';
+    listEmptyEl.classList.remove('hidden');
+    return;
+  }
+
+  listEmptyEl.classList.add('hidden');
+
   for (const item of listState.items) {
     const li = document.createElement('li');
 
@@ -405,28 +415,19 @@ function renderActiveList() {
     const info = document.createElement('div');
     info.className = 'item-info';
 
-    const label = document.createElement('span');
-    label.className = 'item-label';
-    if (item.checked) {
-      label.classList.add('checked');
-    }
-    label.textContent = item.label;
+    const label = createEditableLabel(item);
     info.appendChild(label);
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
-    const parts = [];
-    parts.push(`Added by ${item.addedBy}`);
-    if (item.quantity) {
-      parts.push(`Qty: ${item.quantity}`);
-    }
+    meta.appendChild(createMetaEntry(`Added by ${item.addedBy}`));
+    meta.appendChild(createEditableQuantity(item));
     if (item.vendor) {
-      parts.push(`Vendor: ${item.vendor}`);
+      meta.appendChild(createMetaEntry(`Vendor: ${item.vendor}`));
     }
     if (item.notes) {
-      parts.push(`Notes: ${item.notes}`);
+      meta.appendChild(createMetaEntry(`Notes: ${item.notes}`));
     }
-    meta.textContent = parts.join(' • ');
     info.appendChild(meta);
 
     main.appendChild(checkbox);
@@ -450,6 +451,217 @@ function renderActiveList() {
     li.appendChild(actions);
     itemsContainer.appendChild(li);
   }
+}
+
+function createEditableLabel(item) {
+  const label = document.createElement('span');
+  label.className = 'item-label item-label--editable';
+  if (item.checked) {
+    label.classList.add('checked');
+  }
+  label.textContent = item.label;
+  label.title = 'Click to edit';
+  label.tabIndex = 0;
+
+  let isEditing = false;
+
+  const startEdit = () => {
+    if (isEditing) {
+      return;
+    }
+    isEditing = true;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = item.label;
+    input.className = 'item-label-input';
+    input.setAttribute('aria-label', 'Edit item name');
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+
+    const finish = (commitChanges, focusLabel) => {
+      input.replaceWith(label);
+      if (commitChanges) {
+        const trimmed = input.value.trim();
+        label.textContent = trimmed || item.label;
+      } else {
+        label.textContent = item.label;
+      }
+      label.classList.toggle('checked', Boolean(item.checked));
+      if (focusLabel) {
+        label.focus();
+      }
+      isEditing = false;
+    };
+
+    const commit = ({ focus } = {}) => {
+      const nextLabel = input.value.trim();
+      if (!nextLabel) {
+        showMessage('Item name required', true);
+        input.focus();
+        input.select();
+        return;
+      }
+      finish(true, focus);
+      if (nextLabel !== item.label) {
+        const previousLabel = item.label;
+        item.label = nextLabel;
+        try {
+          sendListAction(activeListId, { type: 'update_item', itemId: item.id, label: nextLabel });
+        } catch (error) {
+          item.label = previousLabel;
+          label.textContent = previousLabel;
+          showMessage(error instanceof Error ? error.message : String(error), true);
+        }
+      }
+    };
+
+    const cancel = ({ focus } = {}) => {
+      finish(false, focus);
+    };
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commit({ focus: true });
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancel({ focus: true });
+      }
+    });
+
+    input.addEventListener('blur', () => {
+      if (isEditing) {
+        commit();
+      }
+    });
+  };
+
+  label.addEventListener('click', startEdit);
+  label.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      startEdit();
+    }
+  });
+
+  return label;
+}
+
+function createEditableQuantity(item) {
+  const entry = document.createElement('span');
+  entry.className = 'item-meta__entry item-meta__entry--editable item-meta__entry--quantity';
+  entry.tabIndex = 0;
+  entry.title = 'Click to edit quantity';
+
+  const updateDisplay = () => {
+    if (item.quantity) {
+      entry.textContent = `Qty: ${item.quantity}`;
+      entry.classList.remove('item-meta__entry--empty');
+    } else {
+      entry.textContent = 'Add quantity';
+      entry.classList.add('item-meta__entry--empty');
+    }
+  };
+
+  let isEditing = false;
+
+  const startEdit = () => {
+    if (isEditing) {
+      return;
+    }
+    isEditing = true;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = item.quantity ?? '';
+    input.className = 'item-meta-input';
+    input.placeholder = 'Quantity';
+    input.setAttribute('aria-label', 'Edit item quantity');
+    entry.replaceWith(input);
+    input.focus();
+    input.select();
+
+    const stopEdit = ({ focus }) => {
+      input.replaceWith(entry);
+      updateDisplay();
+      if (focus) {
+        entry.focus();
+      }
+      isEditing = false;
+    };
+
+    const commit = ({ focus } = {}) => {
+      const trimmed = input.value.trim();
+      const nextQuantity = trimmed || undefined;
+      const currentQuantity = item.quantity;
+      if (nextQuantity) {
+        item.quantity = nextQuantity;
+      } else {
+        delete item.quantity;
+      }
+      stopEdit({ focus });
+      const currentValue = currentQuantity ?? undefined;
+      if ((nextQuantity ?? undefined) === currentValue) {
+        updateDisplay();
+        return;
+      }
+      try {
+        sendListAction(activeListId, {
+          type: 'set_item_quantity',
+          itemId: item.id,
+          quantity: nextQuantity
+        });
+      } catch (error) {
+        if (currentQuantity) {
+          item.quantity = currentQuantity;
+        } else {
+          delete item.quantity;
+        }
+        updateDisplay();
+        showMessage(error instanceof Error ? error.message : String(error), true);
+      }
+    };
+
+    const cancel = ({ focus } = {}) => {
+      stopEdit({ focus });
+    };
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commit({ focus: true });
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancel({ focus: true });
+      }
+    });
+
+    input.addEventListener('blur', () => {
+      if (isEditing) {
+        commit();
+      }
+    });
+  };
+
+  entry.addEventListener('click', startEdit);
+  entry.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      startEdit();
+    }
+  });
+
+  updateDisplay();
+  return entry;
+}
+
+function createMetaEntry(text) {
+  const span = document.createElement('span');
+  span.className = 'item-meta__entry';
+  span.textContent = text;
+  return span;
 }
 
 function renderBulletins() {

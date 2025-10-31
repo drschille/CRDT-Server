@@ -199,7 +199,7 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
               if (!consumeRateLimit(connection, RATE_LIMIT_COST_SYNC)) {
                 return;
               }
-              handleSyncMessage(connection, context, parseDocSelector(message.doc), message.data);
+              await handleSyncMessage(connection, context, parseDocSelector(message.doc), message.data);
               break;
             case 'request_full_state':
               if (message.doc) {
@@ -509,19 +509,54 @@ function flushSync(connection: Connection, context: ServerContext, descriptor: D
   }
 }
 
-function handleSyncMessage(
+async function handleSyncMessage(
   connection: Connection,
   context: ServerContext,
   descriptor: DocDescriptor,
   base64: string
-): void {
+): Promise<void> {
   const subscription = connection.subscriptions.get(descriptorKey(descriptor));
   if (!subscription) {
     throw new Error('Not subscribed to document');
   }
-  const doc = resolveDocForDescriptor(context, descriptor);
+  let doc = resolveDocForDescriptor(context, descriptor);
   if (!doc) {
-    throw new Error('Document unavailable');
+    if (descriptor.kind === 'list') {
+      try {
+        doc = await loadOrGetListDoc(context, descriptor.listId);
+      } catch (error) {
+        warn('failed to load list doc during sync', {
+          error: error instanceof Error ? error.message : String(error),
+          listId: descriptor.listId
+        });
+        forgetListDoc(descriptor.listId);
+        sendJson(connection.socket, {
+          type: 'error',
+          code: 'NOT_FOUND',
+          message: 'List document unavailable'
+        });
+        return;
+      }
+    } else {
+      warn('document missing for sync', {
+        descriptor: descriptor.kind
+      });
+      sendJson(connection.socket, {
+        type: 'error',
+        code: 'NOT_FOUND',
+        message: 'Document unavailable'
+      });
+      return;
+    }
+  }
+
+  if (!doc) {
+    sendJson(connection.socket, {
+      type: 'error',
+      code: 'NOT_FOUND',
+      message: 'Document unavailable'
+    });
+    return;
   }
 
   const messageBytes = fromBase64(base64);
