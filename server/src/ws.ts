@@ -152,13 +152,7 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
     info('websocket connected', { userId });
     sendJson(socket, { type: 'welcome', userId });
 
-    // Auto-subscribe to registry and bulletins for convenience.
-    subscribe(connection, context, { kind: 'registry' });
-    subscribe(connection, context, { kind: 'bulletins' });
-    flushSync(connection, context, { kind: 'registry' });
-    flushSync(connection, context, { kind: 'bulletins' });
-    sendSnapshot(connection, context, { kind: 'registry' });
-    sendSnapshot(connection, context, { kind: 'bulletins' });
+    void initializeConnection(connection, context);
 
     socket.on('message', (raw) => {
       void (async () => {
@@ -171,8 +165,8 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
 
           switch (message.type) {
             case 'subscribe':
-              subscribe(connection, context, parseDocSelector(message.doc));
-              sendSnapshot(connection, context, parseDocSelector(message.doc));
+              await subscribe(connection, context, parseDocSelector(message.doc));
+              await sendSnapshot(connection, context, parseDocSelector(message.doc));
               flushSync(connection, context, parseDocSelector(message.doc));
               break;
             case 'unsubscribe':
@@ -209,10 +203,10 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
               break;
             case 'request_full_state':
               if (message.doc) {
-                sendSnapshot(connection, context, parseDocSelector(message.doc));
+                await sendSnapshot(connection, context, parseDocSelector(message.doc));
               } else {
                 for (const subscription of connection.subscriptions.values()) {
-                  sendSnapshot(connection, context, subscription.descriptor);
+                  await sendSnapshot(connection, context, subscription.descriptor);
                 }
               }
               break;
@@ -367,7 +361,27 @@ function handleBulletinAction(
   }
 }
 
-function subscribe(connection: Connection, context: ServerContext, descriptor: DocDescriptor): void {
+async function initializeConnection(connection: Connection, context: ServerContext): Promise<void> {
+  try {
+    await subscribe(connection, context, { kind: 'registry' });
+    await subscribe(connection, context, { kind: 'bulletins' });
+    await sendSnapshot(connection, context, { kind: 'registry' });
+    await sendSnapshot(connection, context, { kind: 'bulletins' });
+    flushSync(connection, context, { kind: 'registry' });
+    flushSync(connection, context, { kind: 'bulletins' });
+  } catch (error) {
+    warn('failed to initialize connection', {
+      error: error instanceof Error ? error.message : String(error),
+      userId: connection.userId
+    });
+  }
+}
+
+async function subscribe(
+  connection: Connection,
+  context: ServerContext,
+  descriptor: DocDescriptor
+): Promise<void> {
   const key = descriptorKey(descriptor);
   if (!connection.subscriptions.has(key)) {
     connection.subscriptions.set(key, { descriptor, syncState: Automerge.initSyncState() });
@@ -375,13 +389,16 @@ function subscribe(connection: Connection, context: ServerContext, descriptor: D
 
   // Ensure list doc is cached when subscribing.
   if (descriptor.kind === 'list') {
-    void loadOrGetListDoc(context, descriptor.listId).catch((error) => {
+    try {
+      await loadOrGetListDoc(context, descriptor.listId);
+    } catch (error) {
       warn('failed to load list doc during subscribe', {
         error: error instanceof Error ? error.message : String(error),
         listId: descriptor.listId
       });
       forgetListDoc(descriptor.listId);
-    });
+      throw error;
+    }
   }
 }
 
@@ -403,7 +420,11 @@ function broadcastDoc(
   }
 }
 
-function sendSnapshot(connection: Connection, context: ServerContext, descriptor: DocDescriptor): void {
+async function sendSnapshot(
+  connection: Connection,
+  context: ServerContext,
+  descriptor: DocDescriptor
+): Promise<void> {
   switch (descriptor.kind) {
     case 'registry': {
       const state = filterRegistryDoc(context.registryDoc, connection.userId);
@@ -425,7 +446,19 @@ function sendSnapshot(connection: Connection, context: ServerContext, descriptor
         });
         return;
       }
-      const doc = context.listDocs.get(descriptor.listId);
+      let doc = context.listDocs.get(descriptor.listId);
+      if (!doc) {
+        try {
+          doc = await loadOrGetListDoc(context, descriptor.listId);
+        } catch (error) {
+          sendJson(connection.socket, {
+            type: 'error',
+            code: 'NOT_FOUND',
+            message: 'List document unavailable'
+          });
+          return;
+        }
+      }
       if (!doc) {
         sendJson(connection.socket, {
           type: 'error',
