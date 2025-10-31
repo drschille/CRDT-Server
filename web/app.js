@@ -29,10 +29,7 @@ const listEmptyEl = document.querySelector('#list-empty');
 const listContentEl = document.querySelector('#list-content');
 const activeListNameEl = document.querySelector('#active-list-name');
 const activeListMetaEl = document.querySelector('#active-list-meta');
-const addItemForm = document.querySelector('#add-item-form');
-const itemLabelInput = document.querySelector('#item-label');
-const itemQuantityInput = document.querySelector('#item-quantity');
-const itemVendorInput = document.querySelector('#item-vendor');
+const addItemButton = document.querySelector('#add-item-btn');
 const itemsContainer = document.querySelector('#items');
 
 const bulletinForm = document.querySelector('#bulletin-form');
@@ -51,6 +48,13 @@ const listStates = new Map();
 let bulletins = [];
 let activeListId = null;
 
+const ITEM_SYNC_DEBOUNCE_MS = 500;
+const NEW_ITEM_PLACEHOLDER = 'New item';
+const pendingItemActions = new Map();
+let pendingNewItemFocus = null;
+
+const renderedItemSnapshots = new Map();
+
 const state = {
   activeView: 'lists',
   isLoggingOut: false,
@@ -68,6 +72,146 @@ function showMessage(text, isError = false) {
   messagesEl.classList.toggle('messages--error', isError);
   if (!text) {
     messagesEl.classList.remove('messages--error');
+  }
+}
+
+function createListItemElement(itemId) {
+  const li = document.createElement('li');
+  li.dataset.itemId = itemId;
+
+  const main = document.createElement('div');
+  main.className = 'item-main';
+  li.appendChild(main);
+
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'item-checkbox';
+  checkbox.dataset.itemId = itemId;
+  checkbox.addEventListener('change', handleCheckboxChange);
+  main.appendChild(checkbox);
+
+  const fields = document.createElement('div');
+  fields.className = 'item-fields';
+  main.appendChild(fields);
+
+  const labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.placeholder = 'Item name';
+  labelInput.maxLength = 200;
+  labelInput.className = 'item-field item-field--label';
+  labelInput.dataset.itemId = itemId;
+  labelInput.dataset.field = 'label';
+  labelInput.addEventListener('focus', handleLabelFocus);
+  labelInput.addEventListener('input', handleLabelInput);
+  labelInput.addEventListener('blur', handleLabelBlur);
+  labelInput.addEventListener('keydown', handleLabelKeyDown);
+  fields.appendChild(labelInput);
+
+  const fieldRow = document.createElement('div');
+  fieldRow.className = 'item-field-row';
+  fields.appendChild(fieldRow);
+
+  const quantityInput = document.createElement('input');
+  quantityInput.type = 'text';
+  quantityInput.placeholder = 'Quantity';
+  quantityInput.maxLength = 200;
+  quantityInput.className = 'item-field item-field--quantity';
+  quantityInput.dataset.itemId = itemId;
+  quantityInput.dataset.field = 'quantity';
+  quantityInput.addEventListener('input', handleQuantityInput);
+  quantityInput.addEventListener('blur', handleQuantityBlur);
+  quantityInput.addEventListener('keydown', handleEditableKeyDown);
+  fieldRow.appendChild(quantityInput);
+
+  const vendorInput = document.createElement('input');
+  vendorInput.type = 'text';
+  vendorInput.placeholder = 'Vendor';
+  vendorInput.maxLength = 200;
+  vendorInput.className = 'item-field item-field--vendor';
+  vendorInput.dataset.itemId = itemId;
+  vendorInput.dataset.field = 'vendor';
+  vendorInput.addEventListener('input', handleVendorInput);
+  vendorInput.addEventListener('blur', handleVendorBlur);
+  vendorInput.addEventListener('keydown', handleEditableKeyDown);
+  fieldRow.appendChild(vendorInput);
+
+  const meta = document.createElement('div');
+  meta.className = 'item-meta';
+  fields.appendChild(meta);
+
+  const notes = document.createElement('div');
+  notes.className = 'item-notes hidden';
+  notes.dataset.role = 'notes';
+  fields.appendChild(notes);
+
+  const actions = document.createElement('div');
+  actions.className = 'item-actions';
+  li.appendChild(actions);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'icon-btn';
+  removeBtn.setAttribute('aria-label', 'Remove item');
+  removeBtn.textContent = '✕';
+  removeBtn.dataset.itemId = itemId;
+  removeBtn.addEventListener('click', handleRemoveClick);
+  actions.appendChild(removeBtn);
+
+  return li;
+}
+
+function updateListItemElement(li, item, listReadOnly) {
+  li.dataset.itemId = item.id;
+
+  const checkbox = li.querySelector('.item-checkbox');
+  if (checkbox instanceof HTMLInputElement) {
+    checkbox.dataset.itemId = item.id;
+    checkbox.checked = Boolean(item.checked);
+    checkbox.disabled = listReadOnly;
+  }
+
+  const labelInput = li.querySelector('input[data-field="label"]');
+  if (labelInput instanceof HTMLInputElement) {
+    labelInput.dataset.itemId = item.id;
+    labelInput.disabled = listReadOnly;
+    labelInput.classList.toggle('item-field--checked', Boolean(item.checked));
+    setInputValuePreserveCaret(labelInput, item.label);
+  }
+
+  const quantityInput = li.querySelector('input[data-field="quantity"]');
+  if (quantityInput instanceof HTMLInputElement) {
+    quantityInput.dataset.itemId = item.id;
+    quantityInput.disabled = listReadOnly;
+    setInputValuePreserveCaret(quantityInput, item.quantity ?? '');
+  }
+
+  const vendorInput = li.querySelector('input[data-field="vendor"]');
+  if (vendorInput instanceof HTMLInputElement) {
+    vendorInput.dataset.itemId = item.id;
+    vendorInput.disabled = listReadOnly;
+    setInputValuePreserveCaret(vendorInput, item.vendor ?? '');
+  }
+
+  const meta = li.querySelector('.item-meta');
+  if (meta) {
+    meta.textContent = `Added by ${item.addedBy}`;
+  }
+
+  const notes = li.querySelector('.item-notes');
+  if (notes) {
+    if (item.notes) {
+      notes.textContent = `Notes: ${item.notes}`;
+      notes.classList.remove('hidden');
+    } else {
+      notes.textContent = '';
+      notes.classList.add('hidden');
+    }
+  }
+
+  const removeBtn = li.querySelector('.icon-btn');
+  if (removeBtn instanceof HTMLButtonElement) {
+    removeBtn.dataset.itemId = item.id;
+    removeBtn.disabled = listReadOnly;
   }
 }
 
@@ -114,6 +258,12 @@ function resetClientState(clearUI) {
   listStates.clear();
   bulletins = [];
   activeListId = null;
+  pendingNewItemFocus = null;
+  for (const entry of pendingItemActions.values()) {
+    clearTimeout(entry.timer);
+  }
+  pendingItemActions.clear();
+  renderedItemSnapshots.clear();
   if (clearUI) {
     updateCurrentUser();
     renderLists();
@@ -331,6 +481,7 @@ function renderLists() {
 
 function selectList(listId) {
   activeListId = listId;
+  pendingNewItemFocus = null;
   const descriptor = { kind: 'list', listId };
   sendSubscribe(descriptor);
   requestFullState(descriptor);
@@ -346,16 +497,22 @@ function closeList() {
   sendUnsubscribe(descriptor);
   listStates.delete(activeListId);
   activeListId = null;
+  pendingNewItemFocus = null;
   renderLists();
   renderActiveList();
 }
 
 function renderActiveList() {
+  addItemButton.classList.toggle('hidden', !activeListId);
+  addItemButton.disabled = !activeListId;
+
   if (!activeListId) {
     activeListNameEl.textContent = 'Select a list';
     activeListMetaEl.textContent = '';
+    listEmptyEl.textContent = 'No list selected.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
+    itemsContainer.innerHTML = '';
     return;
   }
 
@@ -363,8 +520,11 @@ function renderActiveList() {
   if (!entry) {
     activeListNameEl.textContent = 'List unavailable';
     activeListMetaEl.textContent = '';
+    listEmptyEl.textContent = 'List unavailable.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
+    itemsContainer.innerHTML = '';
+    addItemButton.disabled = true;
     return;
   }
 
@@ -374,81 +534,339 @@ function renderActiveList() {
   }`;
 
   const listState = listStates.get(activeListId);
-  if (!listState || listState.items.length === 0) {
+  if (!listState) {
+    listEmptyEl.textContent = 'Loading list...';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
     itemsContainer.innerHTML = '';
+    addItemButton.disabled = true;
     return;
   }
 
-  listEmptyEl.classList.add('hidden');
+  const canAddItems = !entry.archived;
+  addItemButton.disabled = !canAddItems;
+  addItemButton.title = canAddItems ? 'Add item' : 'Archived lists cannot be edited';
+  const listReadOnly = entry.archived;
+
   listContentEl.classList.remove('hidden');
 
-  itemsContainer.innerHTML = '';
+  const currentListId = activeListId;
+  const existingItems = new Map();
+  for (const li of itemsContainer.querySelectorAll('li[data-item-id]')) {
+    existingItems.set(li.dataset.itemId ?? '', li);
+  }
+
+  const seenIds = new Set();
+
+  if (listState.items.length === 0) {
+    listEmptyEl.textContent = 'No items yet. Press + to add one.';
+    listEmptyEl.classList.remove('hidden');
+  } else {
+    listEmptyEl.classList.add('hidden');
+  }
+
   for (const item of listState.items) {
-    const li = document.createElement('li');
-
-    const main = document.createElement('div');
-    main.className = 'item-main';
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = Boolean(item.checked);
-    checkbox.addEventListener('change', () =>
-      sendListAction(activeListId, {
-        type: 'toggle_item_checked',
-        itemId: item.id,
-        checked: checkbox.checked
-      })
-    );
-
-    const info = document.createElement('div');
-    info.className = 'item-info';
-
-    const label = document.createElement('span');
-    label.className = 'item-label';
-    if (item.checked) {
-      label.classList.add('checked');
+    seenIds.add(item.id);
+    let li = existingItems.get(item.id);
+    const isNew = !li;
+    if (!li) {
+      li = createListItemElement(item.id);
     }
-    label.textContent = item.label;
-    info.appendChild(label);
-
-    const meta = document.createElement('div');
-    meta.className = 'item-meta';
-    const parts = [];
-    parts.push(`Added by ${item.addedBy}`);
-    if (item.quantity) {
-      parts.push(`Qty: ${item.quantity}`);
-    }
-    if (item.vendor) {
-      parts.push(`Vendor: ${item.vendor}`);
-    }
-    if (item.notes) {
-      parts.push(`Notes: ${item.notes}`);
-    }
-    meta.textContent = parts.join(' • ');
-    info.appendChild(meta);
-
-    main.appendChild(checkbox);
-    main.appendChild(info);
-
-    const actions = document.createElement('div');
-    actions.className = 'item-actions';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'icon-btn';
-    removeBtn.setAttribute('aria-label', 'Remove item');
-    removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', () =>
-      sendListAction(activeListId, { type: 'remove_item', itemId: item.id })
-    );
-
-    actions.appendChild(removeBtn);
-
-    li.appendChild(main);
-    li.appendChild(actions);
+    updateListItemElement(li, item, listReadOnly);
     itemsContainer.appendChild(li);
+    setRenderedItemSnapshot(currentListId, item);
+    if (isNew) {
+      li.dataset.justAdded = 'true';
+    } else {
+      delete li.dataset.justAdded;
+    }
+  }
+
+  for (const [itemId, li] of existingItems) {
+    if (!seenIds.has(itemId)) {
+      li.remove();
+      if (currentListId) {
+        renderedItemSnapshots.delete(makeItemKey(currentListId, itemId));
+      }
+    }
+  }
+
+  if (pendingNewItemFocus && pendingNewItemFocus.listId === currentListId) {
+    const created = listState.items.find((it) => !pendingNewItemFocus.previousIds.has(it.id));
+    if (created) {
+      const li = itemsContainer.querySelector(`li[data-item-id="${created.id}"]`);
+      const focusInput = li?.querySelector('input[data-field="label"]');
+      if (focusInput instanceof HTMLInputElement) {
+        requestAnimationFrame(() => {
+          focusInput.focus();
+          focusInput.select();
+        });
+      }
+      pendingNewItemFocus = null;
+    }
+  }
+}
+
+function handleLabelFocus(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  input.select();
+  input.classList.remove('item-field--error');
+}
+
+function handleLabelInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  input.classList.remove('item-field--error');
+  scheduleDebouncedItemAction(listId, `${itemId}:label`, () => {
+    const trimmed = input.value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    if (snapshot && trimmed === snapshot.label) {
+      return null;
+    }
+    return { action: { type: 'update_item', itemId, label: trimmed } };
+  });
+}
+
+function handleLabelBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  const trimmed = input.value.trim();
+  if (!trimmed) {
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    input.value = snapshot?.label ?? '';
+    input.classList.add('item-field--error');
+    showMessage('Item name required', true);
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:label`);
+}
+
+function handleLabelKeyDown(event) {
+  if (!(event.currentTarget instanceof HTMLInputElement)) {
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.currentTarget.blur();
+  } else if (event.key === 'Escape') {
+    const listId = activeListId;
+    const itemId = event.currentTarget.dataset.itemId;
+    if (!listId || !itemId) {
+      return;
+    }
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    if (snapshot) {
+      event.currentTarget.value = snapshot.label;
+      event.currentTarget.classList.remove('item-field--error');
+      event.currentTarget.blur();
+    }
+  }
+}
+
+function handleQuantityInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  scheduleDebouncedItemAction(listId, `${itemId}:quantity`, () => {
+    const trimmed = input.value.trim();
+    const nextValue = trimmed;
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    const previous = snapshot?.quantity ?? '';
+    if (nextValue === previous) {
+      return null;
+    }
+    return {
+      action: {
+        type: 'set_item_quantity',
+        itemId,
+        quantity: trimmed ? trimmed : undefined
+      }
+    };
+  });
+}
+
+function handleQuantityBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:quantity`);
+}
+
+function handleVendorInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  scheduleDebouncedItemAction(listId, `${itemId}:vendor`, () => {
+    const trimmed = input.value.trim();
+    const nextValue = trimmed;
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    const previous = snapshot?.vendor ?? '';
+    if (nextValue === previous) {
+      return null;
+    }
+    return {
+      action: {
+        type: 'set_item_vendor',
+        itemId,
+        vendor: trimmed ? trimmed : undefined
+      }
+    };
+  });
+}
+
+function handleVendorBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:vendor`);
+}
+
+function handleEditableKeyDown(event) {
+  if (!(event.currentTarget instanceof HTMLInputElement)) {
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+}
+
+function handleCheckboxChange(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  if (!activeListId) {
+    return;
+  }
+  const itemId = input.dataset.itemId;
+  if (!itemId) {
+    return;
+  }
+  const labelInput = itemsContainer.querySelector(`input[data-item-id="${itemId}"][data-field="label"]`);
+  if (labelInput instanceof HTMLInputElement) {
+    labelInput.classList.toggle('item-field--checked', input.checked);
+  }
+  try {
+    sendListAction(activeListId, {
+      type: 'toggle_item_checked',
+      itemId,
+      checked: input.checked
+    });
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function handleRemoveClick(event) {
+  const button = event.currentTarget;
+  if (!(button instanceof HTMLButtonElement) || button.disabled) {
+    return;
+  }
+  if (!activeListId) {
+    return;
+  }
+  const itemId = button.dataset.itemId;
+  if (!itemId) {
+    return;
+  }
+  try {
+    sendListAction(activeListId, { type: 'remove_item', itemId });
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function setRenderedItemSnapshot(listId, item) {
+  if (!listId) {
+    return;
+  }
+  renderedItemSnapshots.set(makeItemKey(listId, item.id), {
+    label: item.label,
+    quantity: item.quantity ?? '',
+    vendor: item.vendor ?? '',
+    checked: Boolean(item.checked)
+  });
+}
+
+function getRenderedItemSnapshot(listId, itemId) {
+  if (!listId) {
+    return undefined;
+  }
+  return renderedItemSnapshots.get(makeItemKey(listId, itemId));
+}
+
+function makeItemKey(listId, itemId) {
+  return `${listId}:${itemId}`;
+}
+
+function setInputValuePreserveCaret(input, nextValue) {
+  if (input.value === nextValue) {
+    return;
+  }
+  const isFocused = document.activeElement === input;
+  let selectionStart = null;
+  let selectionEnd = null;
+  if (isFocused) {
+    selectionStart = input.selectionStart;
+    selectionEnd = input.selectionEnd;
+  }
+  input.value = nextValue;
+  if (isFocused && selectionStart !== null && selectionStart !== undefined) {
+    const start = Math.min(nextValue.length, selectionStart);
+    const end =
+      selectionEnd !== null && selectionEnd !== undefined
+        ? Math.min(nextValue.length, selectionEnd)
+        : start;
+    try {
+      input.setSelectionRange(start, end);
+    } catch {
+      // Ignore browsers that disallow manually setting the selection.
+    }
   }
 }
 
@@ -589,6 +1007,57 @@ function parseServerDescriptor(docSelector) {
   throw new Error('Unknown document selector');
 }
 
+function scheduleDebouncedItemAction(listId, key, build) {
+  if (!listId) {
+    return;
+  }
+  const mapKey = `${listId}:${key}`;
+  const existing = pendingItemActions.get(mapKey);
+  if (existing) {
+    clearTimeout(existing.timer);
+  }
+  const timer = window.setTimeout(() => {
+    runPendingItemAction(mapKey);
+  }, ITEM_SYNC_DEBOUNCE_MS);
+  pendingItemActions.set(mapKey, { timer, listId, build });
+}
+
+function flushDebouncedItemAction(listId, key) {
+  if (!listId) {
+    return;
+  }
+  const mapKey = `${listId}:${key}`;
+  const entry = pendingItemActions.get(mapKey);
+  if (!entry) {
+    return;
+  }
+  clearTimeout(entry.timer);
+  runPendingItemAction(mapKey);
+}
+
+function runPendingItemAction(mapKey) {
+  const entry = pendingItemActions.get(mapKey);
+  if (!entry) {
+    return;
+  }
+  pendingItemActions.delete(mapKey);
+  const result = entry.build();
+  if (!result) {
+    return;
+  }
+  if ('error' in result) {
+    if (result.error) {
+      showMessage(result.error, true);
+    }
+    return;
+  }
+  try {
+    sendListAction(entry.listId, result.action);
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
 function sendRegistryAction(action) {
   ensureSocketOpen();
   socket.send(JSON.stringify({ type: 'registry_action', action }));
@@ -683,31 +1152,22 @@ createListForm.addEventListener('submit', (event) => {
   }
 });
 
-addItemForm.addEventListener('submit', (event) => {
-  event.preventDefault();
+addItemButton.addEventListener('click', () => {
   if (!activeListId) {
     showMessage('Select a list first', true);
     return;
   }
-  const label = itemLabelInput.value.trim();
-  const quantity = itemQuantityInput.value.trim();
-  const vendor = itemVendorInput.value.trim();
-  if (!label) {
-    showMessage('Item name required', true);
-    return;
-  }
+  const listState = listStates.get(activeListId);
+  const existingIds = new Set((listState?.items ?? []).map((item) => item.id));
   try {
+    pendingNewItemFocus = { listId: activeListId, previousIds: existingIds };
     sendListAction(activeListId, {
       type: 'add_item',
-      label,
-      quantity: quantity || undefined,
-      vendor: vendor || undefined
+      label: NEW_ITEM_PLACEHOLDER
     });
-    itemLabelInput.value = '';
-    itemQuantityInput.value = '';
-    itemVendorInput.value = '';
   } catch (error) {
-    showMessage(error.message, true);
+    pendingNewItemFocus = null;
+    showMessage(error instanceof Error ? error.message : String(error), true);
   }
 });
 

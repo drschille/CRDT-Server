@@ -76,25 +76,10 @@
                 </div>
                 <div id="list-empty" class="empty-state">No list selected.</div>
                 <div id="list-content" class="list-content hidden">
-                  <form id="add-item-form" class="card">
-                    <h3>Add Item</h3>
-                    <div class="form-grid">
-                      <label>
-                        Item name
-                        <input id="item-label" type="text" maxlength="200" required />
-                      </label>
-                      <label>
-                        Quantity (optional)
-                        <input id="item-quantity" type="text" maxlength="200" />
-                      </label>
-                      <label>
-                        Vendor (optional)
-                        <input id="item-vendor" type="text" maxlength="200" />
-                      </label>
-                    </div>
-                    <button type="submit">Add</button>
-                  </form>
                   <ul id="items" class="items"></ul>
+                  <button id="add-item-btn" type="button" class="add-item-btn" aria-label="Add new item">
+                    +
+                  </button>
                 </div>
               </div>
             </div>
