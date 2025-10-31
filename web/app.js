@@ -16,6 +16,10 @@ let socket = null;
 let currentUserId = null;
 let latestPosts = [];
 
+const AutomergeLib = window.Automerge;
+let replicaDoc = null;
+let replicaSyncState = null;
+
 const postById = new Map();
 const textState = new Map();
 const postViews = new Map();
@@ -23,6 +27,16 @@ const postViews = new Map();
 const emptyStateEl = document.createElement('p');
 emptyStateEl.className = 'feed__empty';
 emptyStateEl.textContent = 'No posts yet.';
+
+function resetReplica() {
+  if (!AutomergeLib) {
+    return;
+  }
+  replicaDoc = AutomergeLib.from({ posts: [] });
+  replicaSyncState = AutomergeLib.initSyncState();
+}
+
+resetReplica();
 
 function setConnectedState(isConnected) {
   connectionStatusEl.classList.toggle('status-dot--connected', isConnected);
@@ -43,6 +57,30 @@ function showMessage(text, isError = false) {
 function ensureSocketOpen() {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     throw new Error('WebSocket is not connected');
+  }
+}
+
+function flushSyncMessages() {
+  if (!AutomergeLib || !replicaDoc || !replicaSyncState) {
+    return;
+  }
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  let state = replicaSyncState;
+  while (true) {
+    const [nextState, message] = AutomergeLib.generateSyncMessage(replicaDoc, state);
+    state = nextState;
+    replicaSyncState = nextState;
+    if (!message) {
+      break;
+    }
+    socket.send(
+      JSON.stringify({
+        type: 'sync',
+        data: uint8ArrayToBase64(message)
+      })
+    );
   }
 }
 
@@ -83,6 +121,12 @@ function connect() {
     return;
   }
 
+  if (!AutomergeLib) {
+    showMessage('Automerge library failed to load', true);
+    return;
+  }
+
+  resetReplica();
   showMessage(`Connecting to ${connectUrl}…`);
   socket = new WebSocket(connectUrl);
 
@@ -90,6 +134,7 @@ function connect() {
     setConnectedState(true);
     showMessage('Connected');
     socket.send(JSON.stringify({ type: 'hello', clientVersion: 'web-0.2-live' }));
+    flushSyncMessages();
   });
 
   socket.addEventListener('message', (event) => {
@@ -103,6 +148,8 @@ function connect() {
 
   socket.addEventListener('close', () => {
     setConnectedState(false);
+    resetReplica();
+    socket = null;
     currentUserId = null;
     latestPosts = [];
     postById.clear();
@@ -139,15 +186,38 @@ function handleMessage(message) {
     case 'welcome':
       currentUserId = message.userId;
       updateCurrentUser();
+      flushSyncMessages();
       break;
     case 'snapshot':
       handleSnapshot(Array.isArray(message.state?.posts) ? message.state.posts : []);
+      break;
+    case 'sync':
+      handleSyncPayload(typeof message.data === 'string' ? message.data : '');
       break;
     case 'error':
       showMessage(`Server error (${message.code}): ${message.message}`, true);
       break;
     default:
       console.warn('Unknown message type', message);
+  }
+}
+
+function handleSyncPayload(base64) {
+  if (!base64 || !AutomergeLib || !replicaDoc || !replicaSyncState) {
+    return;
+  }
+  try {
+    const [nextDoc, nextState] = AutomergeLib.receiveSyncMessage(
+      replicaDoc,
+      replicaSyncState,
+      base64ToUint8Array(base64)
+    );
+    replicaDoc = nextDoc;
+    replicaSyncState = nextState;
+    flushSyncMessages();
+  } catch (error) {
+    console.error('Failed to apply sync payload', error);
+    showMessage('Failed to process sync data from server', true);
   }
 }
 
@@ -536,6 +606,31 @@ function restoreFocus(state) {
   const end = clamp(state.selectionEnd, 0, length);
   editor.focus();
   editor.setSelectionRange(start, end);
+}
+
+function base64ToUint8Array(base64) {
+  if (!base64) {
+    return new Uint8Array();
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function uint8ArrayToBase64(bytes) {
+  if (!bytes || bytes.length === 0) {
+    return '';
+  }
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 connectBtn.addEventListener('click', connect);

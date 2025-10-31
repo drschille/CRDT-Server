@@ -2,10 +2,16 @@ import * as Automerge from '@automerge/automerge';
 import { randomUUID } from 'node:crypto';
 import { BoardDoc, PostId, UserId, Visibility } from './types.js';
 
+export const MAX_POST_LENGTH = 2000;
+export const MAX_POSTS = 2000;
+
 function requireNonEmptyText(text: string): string {
   const trimmed = text.trim();
   if (trimmed.length === 0) {
     throw new Error('Text must be non-empty');
+  }
+  if (trimmed.length > MAX_POST_LENGTH) {
+    throw new Error('Text exceeds 2000 characters');
   }
   return trimmed;
 }
@@ -44,6 +50,9 @@ export function addPost(
   rawText: string,
   visibility: Visibility = 'public'
 ): Automerge.Doc<BoardDoc> {
+  if (doc.posts.length >= MAX_POSTS) {
+    throw new Error('Post limit reached');
+  }
   const text = requireNonEmptyText(rawText);
   return Automerge.change(doc, 'add_post', (draft) => {
     draft.posts.push({
@@ -71,6 +80,9 @@ export function editPost(
       throw new Error('Post not found');
     }
     assertCanEdit(post, userId);
+    if (text.length > MAX_POST_LENGTH) {
+      throw new Error('Text exceeds 2000 characters');
+    }
     replaceText(post.text, text);
     post.editedAt = new Date().toISOString();
     post.lastEditedBy = userId;
@@ -88,6 +100,9 @@ export function applyLiveEdit(
   if (index < 0 || deleteCount < 0) {
     throw new Error('Invalid range');
   }
+  if (insertText.length > MAX_POST_LENGTH) {
+    throw new Error('Text exceeds 2000 characters');
+  }
 
   return Automerge.change(doc, 'edit_post_live', (draft) => {
     const post = draft.posts.find((p) => p.id === postId);
@@ -99,6 +114,11 @@ export function applyLiveEdit(
     const text = post.text;
     const boundedIndex = Math.min(index, text.length);
     const boundedDelete = Math.min(deleteCount, text.length - boundedIndex);
+
+    const resultingLength = text.length - boundedDelete + insertText.length;
+    if (resultingLength > MAX_POST_LENGTH) {
+      throw new Error('Text exceeds 2000 characters');
+    }
 
     for (let i = 0; i < boundedDelete; i += 1) {
       text.deleteAt(boundedIndex);
