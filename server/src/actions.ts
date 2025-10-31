@@ -253,7 +253,6 @@ export function removeItem(
   userId: UserId,
   itemId: string
 ): Automerge.Doc<ShoppingListDoc> {
-  ensureListDocMatches(doc, entry);
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'remove_item', (draft) => {
     const index = draft.items.findIndex((item) => item.id === itemId);
