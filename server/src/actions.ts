@@ -42,7 +42,6 @@ export function createList(
       ownerId: userId,
       name: toText(name),
       createdAt: new Date().toISOString(),
-      updatedAt: undefined,
       visibility,
       collaborators: arrayToRecord(cleanedCollabs),
       archived: false
@@ -143,16 +142,22 @@ export function addItem(
   }
 
   return Automerge.change(doc, 'add_item', (draft) => {
-    draft.items.push({
+    const item = {
       id: randomUUID(),
       label: toText(label),
       createdAt: new Date().toISOString(),
       addedBy: userId,
-      quantity: trimOptionalField(quantity),
-      vendor: trimOptionalField(vendor),
-      notes: undefined,
       checked: false
-    });
+    };
+    const qty = trimOptionalField(quantity);
+    if (qty) {
+      item.quantity = qty;
+    }
+    const vend = trimOptionalField(vendor);
+    if (vend) {
+      item.vendor = vend;
+    }
+    draft.items.push(item);
   });
 }
 
@@ -184,7 +189,12 @@ export function setItemQuantity(
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'set_item_quantity', (draft) => {
     const item = requireListItem(draft, itemId);
-    item.quantity = trimOptionalField(quantity);
+    const trimmed = trimOptionalField(quantity);
+    if (trimmed) {
+      item.quantity = trimmed;
+    } else {
+      delete item.quantity;
+    }
   });
 }
 
@@ -199,7 +209,12 @@ export function setItemVendor(
   ensureListEditable(entry, userId);
   return Automerge.change(doc, 'set_item_vendor', (draft) => {
     const item = requireListItem(draft, itemId);
-    item.vendor = trimOptionalField(vendor);
+    const trimmed = trimOptionalField(vendor);
+    if (trimmed) {
+      item.vendor = trimmed;
+    } else {
+      delete item.vendor;
+    }
   });
 }
 
@@ -215,7 +230,11 @@ export function setItemNotes(
   const trimmed = trimNotes(notes);
   return Automerge.change(doc, 'set_item_notes', (draft) => {
     const item = requireListItem(draft, itemId);
-    item.notes = trimmed ? toText(trimmed) : undefined;
+    if (trimmed) {
+      item.notes = toText(trimmed);
+    } else {
+      delete item.notes;
+    }
   });
 }
 
@@ -266,7 +285,6 @@ export function addBulletin(
       authorId: userId,
       text: toText(text),
       createdAt: new Date().toISOString(),
-      editedAt: undefined,
       visibility
     });
   });
