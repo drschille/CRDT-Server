@@ -6,37 +6,40 @@ const serverUrlInput = document.querySelector('#server-url');
 const usernameInput = document.querySelector('#username');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
-const postsContainer = document.querySelector('#posts');
-const composerForm = document.querySelector('#composer-form');
-const postTextInput = document.querySelector('#post-text');
-const visibilitySelect = document.querySelector('#visibility');
-const postTemplate = document.querySelector('#post-template');
+
+const listsContainer = document.querySelector('#lists');
+const listsEmptyState = document.querySelector('#lists-empty');
+const createListForm = document.querySelector('#create-list-form');
+const listNameInput = document.querySelector('#list-name');
+const listVisibilitySelect = document.querySelector('#list-visibility');
+
+const listDetailSection = document.querySelector('#list-detail');
+const activeListNameEl = document.querySelector('#active-list-name');
+const activeListMetaEl = document.querySelector('#active-list-meta');
+const closeListBtn = document.querySelector('#close-list-btn');
+const listEmptyEl = document.querySelector('#list-empty');
+const listContentEl = document.querySelector('#list-content');
+const addItemForm = document.querySelector('#add-item-form');
+const itemLabelInput = document.querySelector('#item-label');
+const itemQuantityInput = document.querySelector('#item-quantity');
+const itemVendorInput = document.querySelector('#item-vendor');
+const itemsContainer = document.querySelector('#items');
+
+const bulletinsEmptyState = document.querySelector('#bulletins-empty');
+const bulletinListEl = document.querySelector('#bulletin-list');
+const bulletinForm = document.querySelector('#bulletin-form');
+const bulletinTextInput = document.querySelector('#bulletin-text');
+const bulletinVisibilitySelect = document.querySelector('#bulletin-visibility');
 
 let socket = null;
 let currentUserId = null;
-let latestPosts = [];
 
 const AutomergeLib = window.Automerge;
-let replicaDoc = null;
-let replicaSyncState = null;
-
-const postById = new Map();
-const textState = new Map();
-const postViews = new Map();
-
-const emptyStateEl = document.createElement('p');
-emptyStateEl.className = 'feed__empty';
-emptyStateEl.textContent = 'No posts yet.';
-
-function resetReplica() {
-  if (!AutomergeLib) {
-    return;
-  }
-  replicaDoc = AutomergeLib.from({ posts: [] });
-  replicaSyncState = AutomergeLib.initSyncState();
-}
-
-resetReplica();
+const replicas = new Map();
+const registryEntries = new Map();
+const listStates = new Map();
+let bulletins = [];
+let activeListId = null;
 
 function setConnectedState(isConnected) {
   connectionStatusEl.classList.toggle('status-dot--connected', isConnected);
@@ -56,31 +59,7 @@ function showMessage(text, isError = false) {
 
 function ensureSocketOpen() {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error('WebSocket is not connected');
-  }
-}
-
-function flushSyncMessages() {
-  if (!AutomergeLib || !replicaDoc || !replicaSyncState) {
-    return;
-  }
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  let state = replicaSyncState;
-  while (true) {
-    const [nextState, message] = AutomergeLib.generateSyncMessage(replicaDoc, state);
-    state = nextState;
-    replicaSyncState = nextState;
-    if (!message) {
-      break;
-    }
-    socket.send(
-      JSON.stringify({
-        type: 'sync',
-        data: uint8ArrayToBase64(message)
-      })
-    );
+    throw new Error('WebSocket not connected');
   }
 }
 
@@ -94,13 +73,15 @@ function connect() {
   const usernameRaw = usernameInput.value.trim();
   const username = usernameRaw.toLowerCase();
   if (username && !/^[a-z0-9_-]{1,32}$/.test(username)) {
-    showMessage(
-      'Username may include letters, numbers, underscores, and dashes (max 32 chars)',
-      true
-    );
+    showMessage('Username may include letters, numbers, underscores, and dashes (max 32 chars)', true);
     return;
   }
   usernameInput.value = username;
+
+  if (!AutomergeLib) {
+    showMessage('Automerge library failed to load', true);
+    return;
+  }
 
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.close();
@@ -121,20 +102,18 @@ function connect() {
     return;
   }
 
-  if (!AutomergeLib) {
-    showMessage('Automerge library failed to load', true);
-    return;
-  }
-
-  resetReplica();
   showMessage(`Connecting to ${connectUrl}…`);
   socket = new WebSocket(connectUrl);
 
   socket.addEventListener('open', () => {
+    resetClientState(false);
     setConnectedState(true);
     showMessage('Connected');
-    socket.send(JSON.stringify({ type: 'hello', clientVersion: 'web-0.2-live' }));
-    flushSyncMessages();
+    socket.send(JSON.stringify({ type: 'hello', clientVersion: 'web-1.0-lists' }));
+    sendSubscribe({ kind: 'registry' });
+    sendSubscribe({ kind: 'bulletins' });
+    requestFullState({ kind: 'registry' });
+    requestFullState({ kind: 'bulletins' });
   });
 
   socket.addEventListener('message', (event) => {
@@ -148,16 +127,7 @@ function connect() {
 
   socket.addEventListener('close', () => {
     setConnectedState(false);
-    resetReplica();
-    socket = null;
-    currentUserId = null;
-    latestPosts = [];
-    postById.clear();
-    textState.clear();
-    postViews.forEach((view) => view.element.remove());
-    postViews.clear();
-    renderPosts([]);
-    updateCurrentUser();
+    resetClientState(true);
     showMessage('Disconnected from server');
   });
 
@@ -170,6 +140,21 @@ function connect() {
 function disconnect() {
   if (socket) {
     socket.close();
+  }
+}
+
+function resetClientState(clearUI) {
+  currentUserId = null;
+  replicas.clear();
+  registryEntries.clear();
+  listStates.clear();
+  bulletins = [];
+  activeListId = null;
+  if (clearUI) {
+    updateCurrentUser();
+    renderLists();
+    renderActiveList();
+    renderBulletins();
   }
 }
 
@@ -186,13 +171,12 @@ function handleMessage(message) {
     case 'welcome':
       currentUserId = message.userId;
       updateCurrentUser();
-      flushSyncMessages();
       break;
     case 'snapshot':
-      handleSnapshot(Array.isArray(message.state?.posts) ? message.state.posts : []);
+      handleSnapshot(message.doc, message.state);
       break;
     case 'sync':
-      handleSyncPayload(typeof message.data === 'string' ? message.data : '');
+      handleSync(message.doc, message.data);
       break;
     case 'error':
       showMessage(`Server error (${message.code}): ${message.message}`, true);
@@ -202,416 +186,355 @@ function handleMessage(message) {
   }
 }
 
-function handleSyncPayload(base64) {
-  if (!base64 || !AutomergeLib || !replicaDoc || !replicaSyncState) {
+function handleSnapshot(docSelector, state) {
+  const descriptor = parseServerDescriptor(docSelector);
+  switch (descriptor.kind) {
+    case 'registry': {
+      registryEntries.clear();
+      for (const entry of Array.isArray(state) ? state : []) {
+        registryEntries.set(entry.id, entry);
+      }
+      renderLists();
+      break;
+    }
+    case 'bulletins': {
+      bulletins = Array.isArray(state) ? state : [];
+      renderBulletins();
+      break;
+    }
+    case 'list': {
+      if (state && state.listId) {
+        listStates.set(state.listId, state);
+        if (!activeListId) {
+          activeListId = state.listId;
+        }
+        renderActiveList();
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function handleSync(docSelector, base64) {
+  if (typeof base64 !== 'string' || !base64) {
     return;
   }
+  const descriptor = parseServerDescriptor(docSelector);
+  const replica = ensureReplica(descriptor);
   try {
     const [nextDoc, nextState] = AutomergeLib.receiveSyncMessage(
-      replicaDoc,
-      replicaSyncState,
+      replica.doc,
+      replica.syncState,
       base64ToUint8Array(base64)
     );
-    replicaDoc = nextDoc;
-    replicaSyncState = nextState;
-    flushSyncMessages();
+    replica.doc = nextDoc;
+    replica.syncState = nextState;
+    flushSync(descriptor);
   } catch (error) {
-    console.error('Failed to apply sync payload', error);
+    console.error('Failed to apply sync message', error);
     showMessage('Failed to process sync data from server', true);
   }
 }
 
-function handleSnapshot(posts) {
-  latestPosts = posts;
-  postById.clear();
-  const seen = new Set();
-
-  for (const post of posts) {
-    postById.set(post.id, { ...post });
-    textState.set(post.id, post.text);
-    seen.add(post.id);
-  }
-
-  for (const key of [...textState.keys()]) {
-    if (!seen.has(key)) {
-      textState.delete(key);
-    }
-  }
-
-  renderPosts(posts);
-}
-
-function renderPosts(posts) {
-  const focusState = captureActiveEditorState();
-
-  if (posts.length === 0) {
-    postViews.forEach((view) => view.element.remove());
-    postViews.clear();
-    postsContainer.replaceChildren(emptyStateEl);
-    restoreFocus(focusState);
-    return;
-  }
-
-  if (postsContainer.contains(emptyStateEl)) {
-    postsContainer.removeChild(emptyStateEl);
-  }
-
-  const sorted = [...posts].sort(
-    (a, b) => Date.parse(b.createdAt ?? 0) - Date.parse(a.createdAt ?? 0)
+function renderLists() {
+  listsContainer.innerHTML = '';
+  const entries = Array.from(registryEntries.values()).sort(
+    (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
   );
+  if (entries.length === 0) {
+    listsEmptyState.classList.remove('hidden');
+    return;
+  }
+  listsEmptyState.classList.add('hidden');
 
-  const seen = new Set();
-
-  sorted.forEach((post, index) => {
-    let view = postViews.get(post.id);
-    if (!view) {
-      view = createPostView();
-      postViews.set(post.id, view);
+  for (const entry of entries) {
+    const li = document.createElement('li');
+    li.className = 'list-entry';
+    if (entry.id === activeListId) {
+      li.classList.add('list-entry--active');
     }
-    updatePostView(view, post);
-    const currentNode = postsContainer.children[index] ?? null;
-    if (currentNode !== view.element) {
-      postsContainer.insertBefore(view.element, currentNode);
+    li.dataset.listId = entry.id;
+
+    const title = document.createElement('div');
+    title.textContent = entry.name;
+    title.className = 'list-entry__title';
+
+    const meta = document.createElement('div');
+    meta.className = 'list-entry__meta';
+    meta.innerHTML = `
+      <span>Owner: ${entry.ownerId}</span>
+      <span>Visibility: ${entry.visibility}</span>
+      <span>Collaborators: ${Object.keys(entry.collaborators ?? {}).length}</span>
+      ${entry.archived ? '<span>Archived</span>' : ''}
+    `;
+
+    li.appendChild(title);
+    li.appendChild(meta);
+    li.addEventListener('click', () => selectList(entry.id));
+    listsContainer.appendChild(li);
+  }
+}
+
+function selectList(listId) {
+  activeListId = listId;
+  const descriptor = { kind: 'list', listId };
+  sendSubscribe(descriptor);
+  requestFullState(descriptor);
+  renderLists();
+  renderActiveList();
+}
+
+function closeList() {
+  if (!activeListId) {
+    return;
+  }
+  const descriptor = { kind: 'list', listId: activeListId };
+  sendUnsubscribe(descriptor);
+  listStates.delete(activeListId);
+  activeListId = null;
+  renderLists();
+  renderActiveList();
+}
+
+function renderActiveList() {
+  if (!activeListId) {
+    activeListNameEl.textContent = 'Select a list';
+    activeListMetaEl.textContent = '';
+    listEmptyEl.classList.remove('hidden');
+    listContentEl.classList.add('hidden');
+    return;
+  }
+
+  const entry = registryEntries.get(activeListId);
+  if (!entry) {
+    activeListNameEl.textContent = 'List unavailable';
+    activeListMetaEl.textContent = '';
+    listEmptyEl.classList.remove('hidden');
+    listContentEl.classList.add('hidden');
+    return;
+  }
+
+  activeListNameEl.textContent = entry.name;
+  activeListMetaEl.textContent = `Owner: ${entry.ownerId} • Visibility: ${entry.visibility} • Collaborators: ${
+    Object.keys(entry.collaborators ?? {}).length
+  }`;
+
+  listEmptyEl.classList.add('hidden');
+  listContentEl.classList.remove('hidden');
+
+  const listState = listStates.get(activeListId);
+  itemsContainer.innerHTML = '';
+  if (!listState || listState.items.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty-state';
+    empty.textContent = 'No items yet.';
+    itemsContainer.appendChild(empty);
+    return;
+  }
+
+  for (const item of listState.items) {
+    const li = document.createElement('li');
+
+    const info = document.createElement('div');
+    info.className = 'item-info';
+
+    const label = document.createElement('div');
+    label.className = 'item-label';
+    label.textContent = item.label;
+    if (item.checked) {
+      label.style.textDecoration = 'line-through';
     }
-    seen.add(post.id);
-  });
+    info.appendChild(label);
 
-  for (const [postId, view] of postViews.entries()) {
-    if (!seen.has(postId)) {
-      view.element.remove();
-      postViews.delete(postId);
+    const meta = document.createElement('div');
+    meta.className = 'item-meta';
+    meta.innerHTML = `
+      <span>Added by ${item.addedBy}</span>
+      ${item.quantity ? `<span>Qty: ${item.quantity}</span>` : ''}
+      ${item.vendor ? `<span>Vendor: ${item.vendor}</span>` : ''}
+      ${item.notes ? `<span>Notes: ${item.notes}</span>` : ''}
+    `;
+    info.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'item-actions';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.textContent = item.checked ? 'Uncheck' : 'Check';
+    toggleBtn.addEventListener('click', () => {
+      sendListAction(activeListId, {
+        type: 'toggle_item_checked',
+        itemId: item.id,
+        checked: !item.checked
+      });
+    });
+    actions.appendChild(toggleBtn);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.classList.add('secondary');
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => {
+      sendListAction(activeListId, { type: 'remove_item', itemId: item.id });
+    });
+    actions.appendChild(removeBtn);
+
+    li.appendChild(info);
+    li.appendChild(actions);
+    itemsContainer.appendChild(li);
+  }
+}
+
+function renderBulletins() {
+  bulletinListEl.innerHTML = '';
+  if (bulletins.length === 0) {
+    bulletinsEmptyState.classList.remove('hidden');
+    return;
+  }
+  bulletinsEmptyState.classList.add('hidden');
+
+  const sorted = [...bulletins].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  for (const entry of sorted) {
+    const li = document.createElement('li');
+    li.className = 'bulletin';
+    const body = document.createElement('div');
+    body.textContent = entry.text;
+    const meta = document.createElement('div');
+    meta.className = 'bulletin__meta';
+    meta.innerHTML = `<span>By ${entry.authorId}</span><span>${new Date(entry.createdAt).toLocaleString()}</span><span>${entry.visibility}</span>`;
+    li.appendChild(body);
+    li.appendChild(meta);
+    bulletinListEl.appendChild(li);
+  }
+}
+
+function ensureReplica(descriptor) {
+  const key = descriptorKey(descriptor);
+  let replica = replicas.get(key);
+  if (!replica) {
+    let doc;
+    switch (descriptor.kind) {
+      case 'registry':
+        doc = AutomergeLib.from({ lists: [] });
+        break;
+      case 'bulletins':
+        doc = AutomergeLib.from({ bulletins: [] });
+        break;
+      case 'list':
+        doc = AutomergeLib.from({ listId: descriptor.listId, items: [] });
+        break;
+      default:
+        doc = AutomergeLib.init();
+        break;
     }
+    replica = { doc, syncState: AutomergeLib.initSyncState() };
+    replicas.set(key, replica);
   }
-
-  restoreFocus(focusState);
+  return replica;
 }
 
-function createPostView() {
-  const element = postTemplate.content.firstElementChild.cloneNode(true);
-  const authorEl = element.querySelector('.post__author');
-  const timestampEl = element.querySelector('.post__timestamp');
-  const visibilityEl = element.querySelector('.post__visibility');
-  const editorEl = element.querySelector('.post__editor');
-  const likeBtn = element.querySelector('.btn-like');
-  const likesLabel = element.querySelector('.likes');
-  const deleteBtn = element.querySelector('.btn-delete');
-  const statusEl = element.querySelector('.post__status');
-
-  likeBtn.addEventListener('click', onLikeClick);
-  deleteBtn.addEventListener('click', onDeleteClick);
-  editorEl.addEventListener('input', onEditorInput);
-
-  return {
-    element,
-    authorEl,
-    timestampEl,
-    visibilityEl,
-    editorEl,
-    likeBtn,
-    likesLabel,
-    deleteBtn,
-    statusEl
-  };
+function sendSubscribe(descriptor) {
+  ensureReplica(descriptor);
+  ensureSocketOpen();
+  socket.send(JSON.stringify({ type: 'subscribe', doc: toWireSelector(descriptor) }));
+  flushSync(descriptor);
 }
 
-function transformSelection(oldStart, oldEnd, delta) {
-  const insertLen = delta.insertText.length;
-  const deleteLen = delta.deleteCount;
-  const net = insertLen - deleteLen;
-  const spanStart = delta.index;
-  const spanEndOld = delta.index + deleteLen; // end index (exclusive) of replaced segment in old text
-
-  // Entirely before span
-  if (oldEnd <= spanStart) {
-    return [oldStart, oldEnd];
-  }
-  // Entirely after span
-  if (oldStart >= spanEndOld) {
-    return [oldStart + net, oldEnd + net];
-  }
-  // Overlaps span → collapse to end of inserted text
-  const newPos = spanStart + insertLen;
-  return [newPos, newPos];
+function sendUnsubscribe(descriptor) {
+  ensureSocketOpen();
+  replicas.delete(descriptorKey(descriptor));
+  socket.send(JSON.stringify({ type: 'unsubscribe', doc: toWireSelector(descriptor) }));
 }
 
-function updatePostView(view, post) {
-  view.element.dataset.postId = post.id;
-  view.authorEl.textContent = `@${post.authorId}`;
-  view.timestampEl.textContent = formatTimestamp(post);
-  view.visibilityEl.textContent = post.visibility === 'private' ? '🔒 Private' : '🌐 Public';
-
-  const canEdit = post.visibility === 'public' || post.authorId === currentUserId;
-  const canDelete = post.authorId === currentUserId;
-  const likeCount = Object.keys(post.likes ?? {}).length;
-  const hasLiked = Boolean(currentUserId && post.likes?.[currentUserId]);
-
-  view.editorEl.dataset.postId = post.id;
-  view.editorEl.dataset.canEdit = String(canEdit);
-  view.editorEl.readOnly = !canEdit;
-  view.editorEl.classList.toggle('post__editor--readonly', !canEdit);
-
-  const previousValue = view.editorEl.value;
-  if (previousValue !== post.text) {
-    const delta = computeDelta(previousValue, post.text);
-    if (delta && typeof view.editorEl.setRangeText === 'function') {
-      const { index, deleteCount, insertText } = delta;
-      const wasFocused = document.activeElement === view.editorEl;
-      const oldStart = wasFocused ? (view.editorEl.selectionStart ?? 0) : 0;
-      const oldEnd = wasFocused ? (view.editorEl.selectionEnd ?? oldStart) : 0;
-      const prevScrollTop = view.editorEl.scrollTop;
-      const prevScrollLeft = view.editorEl.scrollLeft;
-      view.editorEl.setRangeText(insertText, index, index + deleteCount, 'end');
-      if (wasFocused) {
-        view.editorEl.scrollTop = prevScrollTop;
-        view.editorEl.scrollLeft = prevScrollLeft;
-        try {
-          let nextStart = oldStart;
-          let nextEnd = oldEnd;
-          // Transform only if selection not strictly before change span
-          if (!(oldEnd <= index)) {
-            [nextStart, nextEnd] = transformSelection(oldStart, oldEnd, delta);
-          }
-          const len = view.editorEl.value.length;
-          // Ensure element focused before setting selection (some browsers ignore selection change otherwise)
-          view.editorEl.focus();
-          // Defer selection application to next frame to avoid race with value mutation
-          requestAnimationFrame(() => {
-            view.editorEl.setSelectionRange(
-              clamp(nextStart, 0, len),
-              clamp(nextEnd, 0, len)
-            );
-          });
-        } catch (_) {
-          // Silent: caret will be at end per 'end' behavior if transform fails.
-        }
-      }
-    } else {
-      view.editorEl.value = post.text;
+function flushSync(descriptor) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  const replica = replicas.get(descriptorKey(descriptor));
+  if (!replica) {
+    return;
+  }
+  while (true) {
+    const [nextState, message] = AutomergeLib.generateSyncMessage(replica.doc, replica.syncState);
+    replica.syncState = nextState;
+    if (!message) {
+      break;
     }
-
-    if (view.editorEl.value !== post.text) {
-      view.editorEl.value = post.text;
-    }
-  }
-
-  textState.set(post.id, view.editorEl.value);
-
-  view.likeBtn.dataset.postId = post.id;
-  view.likeBtn.textContent = hasLiked ? 'Unlike' : 'Like';
-  view.likeBtn.classList.toggle('primary', hasLiked);
-
-  view.likesLabel.textContent = likeCount === 1 ? '1 like' : `${likeCount} likes`;
-
-  view.deleteBtn.dataset.postId = post.id;
-  view.deleteBtn.classList.toggle('hidden', !canDelete);
-
-  view.statusEl.textContent = buildStatusMessage(post, canEdit);
-}
-
-function onLikeClick(event) {
-  const button = event.currentTarget;
-  if (!(button instanceof HTMLButtonElement)) {
-    return;
-  }
-  const postId = button.dataset.postId;
-  if (!postId) {
-    return;
-  }
-  const post = postById.get(postId);
-  if (!post) {
-    return;
-  }
-  try {
-    ensureSocketOpen();
-    const hasLiked = Boolean(currentUserId && post.likes?.[currentUserId]);
-    socket.send(
-      JSON.stringify(hasLiked ? { type: 'unlike_post', id: postId } : { type: 'like_post', id: postId })
-    );
-  } catch (error) {
-    showMessage(error.message, true);
-  }
-}
-
-function onDeleteClick(event) {
-  const button = event.currentTarget;
-  if (!(button instanceof HTMLButtonElement)) {
-    return;
-  }
-  const postId = button.dataset.postId;
-  if (!postId) {
-    return;
-  }
-  const post = postById.get(postId);
-  if (!post || post.authorId !== currentUserId) {
-    return;
-  }
-  const confirmDelete = window.confirm('Delete this post?');
-  if (!confirmDelete) {
-    return;
-  }
-  try {
-    ensureSocketOpen();
-    socket.send(JSON.stringify({ type: 'delete_post', id: postId }));
-  } catch (error) {
-    showMessage(error.message, true);
-  }
-}
-
-function onEditorInput(event) {
-  const textarea = event.currentTarget;
-  if (!(textarea instanceof HTMLTextAreaElement)) {
-    return;
-  }
-  const postId = textarea.dataset.postId;
-  const canEdit = textarea.dataset.canEdit === 'true';
-  if (!postId || !canEdit) {
-    return;
-  }
-
-  const previous = textState.get(postId) ?? '';
-  const next = textarea.value;
-
-  const delta = computeDelta(previous, next);
-  if (!delta) {
-    return;
-  }
-
-  try {
-    ensureSocketOpen();
     socket.send(
       JSON.stringify({
-        type: 'edit_post_live',
-        id: postId,
-        index: delta.index,
-        deleteCount: delta.deleteCount,
-        text: delta.insertText
+        type: 'sync',
+        doc: toWireSelector(descriptor),
+        data: uint8ArrayToBase64(message)
       })
     );
-    updateLocalPostText(postId, next);
-  } catch (error) {
-    showMessage(error.message, true);
-    textarea.value = previous;
   }
 }
 
-function computeDelta(previous, next) {
-  if (previous === next) {
-    return null;
-  }
-
-  let start = 0;
-  const prevLength = previous.length;
-  const nextLength = next.length;
-
-  while (start < prevLength && start < nextLength && previous[start] === next[start]) {
-    start += 1;
-  }
-
-  let prevEnd = prevLength - 1;
-  let nextEnd = nextLength - 1;
-
-  while (prevEnd >= start && nextEnd >= start && previous[prevEnd] === next[nextEnd]) {
-    prevEnd -= 1;
-    nextEnd -= 1;
-  }
-
-  const deleteCount = prevEnd >= start ? prevEnd - start + 1 : 0;
-  const insertText =
-    nextEnd >= start ? next.slice(start, nextEnd + 1) : '';
-
-  return { index: start, deleteCount, insertText };
-}
-
-function updateLocalPostText(postId, text) {
-  textState.set(postId, text);
-  const post = postById.get(postId);
-  if (post) {
-    post.text = text;
-    post.lastEditedBy = currentUserId ?? post.lastEditedBy;
-  }
-
-  const index = latestPosts.findIndex((p) => p.id === postId);
-  if (index !== -1) {
-    latestPosts[index] = { ...latestPosts[index], text, lastEditedBy: currentUserId ?? latestPosts[index].lastEditedBy };
-  }
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function formatTimestamp(post) {
-  const base = post.editedAt ?? post.createdAt;
-  if (!base) {
-    return '';
-  }
-  const date = new Date(base);
-  const label = date.toLocaleString();
-  if (post.editedAt) {
-    const editor = formatUserId(post.lastEditedBy ?? post.authorId);
-    return `${label} (edited by ${editor})`;
-  }
-  return `${label} (created by ${formatUserId(post.authorId)})`;
-}
-
-function formatUserId(userId) {
-  if (!userId) {
-    return 'unknown';
-  }
-  return userId;
-}
-
-function buildStatusMessage(post, canEdit) {
-  const editor = formatUserId(post.lastEditedBy ?? post.authorId);
-  const access =
-    canEdit && post.visibility === 'public'
-      ? 'Live editable by everyone'
-      : canEdit
-        ? 'Live editable by you'
-        : 'Read only';
-  const editedLabel = post.editedAt ? `Edited by ${editor}` : `Created by ${editor}`;
-  return `${access} — ${editedLabel}`;
-}
-
-function captureActiveEditorState() {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLTextAreaElement)) {
-    return null;
-  }
-  const postId = active.dataset.postId;
-  if (!postId || active.dataset.canEdit !== 'true') {
-    return null;
-  }
-  return {
-    postId,
-    selectionStart: active.selectionStart ?? active.value.length,
-    selectionEnd: active.selectionEnd ?? active.value.length
-  };
-}
-
-function restoreFocus(state) {
-  if (!state) {
+function requestFullState(descriptor) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
   }
-  const view = postViews.get(state.postId);
-  if (!view) {
-    return;
+  socket.send(JSON.stringify({ type: 'request_full_state', doc: toWireSelector(descriptor) }));
+}
+
+function descriptorKey(descriptor) {
+  switch (descriptor.kind) {
+    case 'registry':
+      return 'registry';
+    case 'bulletins':
+      return 'bulletins';
+    case 'list':
+      return `list:${descriptor.listId}`;
+    default:
+      return 'unknown';
   }
-  const editor = view.editorEl;
-  if (editor.dataset.canEdit !== 'true') {
-    return;
+}
+
+function toWireSelector(descriptor) {
+  switch (descriptor.kind) {
+    case 'registry':
+      return 'registry';
+    case 'bulletins':
+      return 'bulletins';
+    case 'list':
+      return { listId: descriptor.listId };
+    default:
+      return 'registry';
   }
-  const length = editor.value.length;
-  const start = clamp(state.selectionStart, 0, length);
-  const end = clamp(state.selectionEnd, 0, length);
-  editor.focus();
-  editor.setSelectionRange(start, end);
+}
+
+function parseServerDescriptor(docSelector) {
+  if (docSelector === 'registry') {
+    return { kind: 'registry' };
+  }
+  if (docSelector === 'bulletins') {
+    return { kind: 'bulletins' };
+  }
+  if (docSelector && typeof docSelector === 'object' && typeof docSelector.listId === 'string') {
+    return { kind: 'list', listId: docSelector.listId };
+  }
+  throw new Error('Unknown document selector');
+}
+
+function sendRegistryAction(action) {
+  ensureSocketOpen();
+  socket.send(JSON.stringify({ type: 'registry_action', action }));
+}
+
+function sendListAction(listId, action) {
+  ensureSocketOpen();
+  socket.send(JSON.stringify({ type: 'list_action', listId, action }));
+}
+
+function sendBulletinAction(action) {
+  ensureSocketOpen();
+  socket.send(JSON.stringify({ type: 'bulletin_action', action }));
 }
 
 function base64ToUint8Array(base64) {
-  if (!base64) {
-    return new Uint8Array();
-  }
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) {
@@ -621,11 +544,8 @@ function base64ToUint8Array(base64) {
 }
 
 function uint8ArrayToBase64(bytes) {
-  if (!bytes || bytes.length === 0) {
-    return '';
-  }
-  const chunkSize = 0x8000;
   let binary = '';
+  const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const chunk = bytes.subarray(i, i + chunkSize);
     binary += String.fromCharCode(...chunk);
@@ -635,26 +555,66 @@ function uint8ArrayToBase64(bytes) {
 
 connectBtn.addEventListener('click', connect);
 disconnectBtn.addEventListener('click', disconnect);
+closeListBtn.addEventListener('click', closeList);
 
-composerForm.addEventListener('submit', (event) => {
+createListForm.addEventListener('submit', (event) => {
   event.preventDefault();
-  const text = postTextInput.value.trim();
-  const visibility = visibilitySelect.value;
-  if (!text) {
-    showMessage('Write something first', true);
+  const name = listNameInput.value.trim();
+  const visibility = listVisibilitySelect.value;
+  if (!name) {
+    showMessage('List name required', true);
     return;
   }
   try {
-    ensureSocketOpen();
-    socket.send(
-      JSON.stringify({
-        type: 'add_post',
-        text,
-        visibility
-      })
-    );
-    postTextInput.value = '';
-    showMessage('Post submitted');
+    sendRegistryAction({ type: 'create_list', name, visibility });
+    listNameInput.value = '';
+    listVisibilitySelect.value = 'private';
+    showMessage('List created');
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+});
+
+addItemForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (!activeListId) {
+    showMessage('Select a list first', true);
+    return;
+  }
+  const label = itemLabelInput.value.trim();
+  const quantity = itemQuantityInput.value.trim();
+  const vendor = itemVendorInput.value.trim();
+  if (!label) {
+    showMessage('Item name required', true);
+    return;
+  }
+  try {
+    sendListAction(activeListId, {
+      type: 'add_item',
+      label,
+      quantity: quantity || undefined,
+      vendor: vendor || undefined
+    });
+    itemLabelInput.value = '';
+    itemQuantityInput.value = '';
+    itemVendorInput.value = '';
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+});
+
+bulletinForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = bulletinTextInput.value.trim();
+  const visibility = bulletinVisibilitySelect.value;
+  if (!text) {
+    showMessage('Bulletin text required', true);
+    return;
+  }
+  try {
+    sendBulletinAction({ type: 'add_bulletin', text, visibility });
+    bulletinTextInput.value = '';
+    showMessage('Bulletin posted');
   } catch (error) {
     showMessage(error.message, true);
   }

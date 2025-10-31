@@ -9,7 +9,7 @@
   <body>
     <main class="app">
       <section class="connection">
-        <h1>CRDT Board</h1>
+        <h1>Collaborative Lists</h1>
         <div class="status">
           <span id="connection-status" class="status-dot status-dot--disconnected"></span>
           <span id="connection-label">Disconnected</span>
@@ -30,51 +30,83 @@
         <div class="messages" id="messages"></div>
       </section>
 
-      <section class="composer">
-        <h2>Create Post</h2>
-        <form id="composer-form">
-          <textarea
-            id="post-text"
-            placeholder="Share an update…"
-            maxlength="2000"
-            required
-          ></textarea>
-          <div class="composer-controls">
+      <section class="lists" id="lists-section">
+        <header class="section-header">
+          <h2>Lists</h2>
+        </header>
+        <form id="create-list-form" class="card">
+          <div class="form-grid">
+            <label>
+              Name
+              <input id="list-name" type="text" maxlength="200" required />
+            </label>
             <label>
               Visibility
-              <select id="visibility">
-                <option value="public" selected>Public</option>
-                <option value="private">Private</option>
+              <select id="list-visibility">
+                <option value="private" selected>Private</option>
+                <option value="public">Public</option>
               </select>
             </label>
-            <button type="submit">Publish</button>
           </div>
+          <button type="submit">Create List</button>
         </form>
+        <div id="lists-empty" class="empty-state">No lists yet. Create one to get started.</div>
+        <ul id="lists" class="lists__collection"></ul>
       </section>
 
-      <section class="feed">
-        <h2>Latest Posts</h2>
-        <div id="posts"></div>
+      <section class="list-detail" id="list-detail">
+        <header class="section-header">
+          <div>
+            <h2 id="active-list-name">Select a list</h2>
+            <div id="active-list-meta" class="list-meta"></div>
+          </div>
+          <button id="close-list-btn" type="button" class="secondary">Close</button>
+        </header>
+        <div id="list-empty" class="empty-state">No list selected.</div>
+        <div id="list-content" class="list-content hidden">
+          <form id="add-item-form" class="card">
+            <div class="form-grid">
+              <label>
+                Item name
+                <input id="item-label" type="text" maxlength="200" required />
+              </label>
+              <label>
+                Quantity (optional)
+                <input id="item-quantity" type="text" maxlength="200" />
+              </label>
+              <label>
+                Vendor (optional)
+                <input id="item-vendor" type="text" maxlength="200" />
+              </label>
+            </div>
+            <button type="submit">Add Item</button>
+          </form>
+          <ul id="items" class="items"></ul>
+        </div>
+      </section>
+
+      <section class="bulletins" id="bulletins-section">
+        <header class="section-header">
+          <h2>Bulletins</h2>
+        </header>
+        <form id="bulletin-form" class="card">
+          <label>
+            Message
+            <textarea id="bulletin-text" maxlength="2000" required placeholder="Share an announcement…"></textarea>
+          </label>
+          <label>
+            Visibility
+            <select id="bulletin-visibility">
+              <option value="public" selected>Public</option>
+              <option value="private">Private</option>
+            </select>
+          </label>
+          <button type="submit">Post Bulletin</button>
+        </form>
+        <div id="bulletins-empty" class="empty-state">No bulletins yet.</div>
+        <ul id="bulletin-list" class="bulletin-list"></ul>
       </section>
     </main>
-
-    <template id="post-template">
-      <article class="post">
-        <header class="post__meta">
-          <span class="post__author"></span>
-          <span class="post__timestamp"></span>
-          <span class="post__visibility"></span>
-        </header>
-        <textarea class="post__editor" spellcheck="false"></textarea>
-        <footer class="post__actions">
-          <button class="btn-like" type="button"></button>
-          <span class="likes"></span>
-          <button class="btn-delete" type="button">Delete</button>
-          <span class="post__status"></span>
-        </footer>
-      </article>
-    </template>
-
     <script src="./vendor/automerge.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
