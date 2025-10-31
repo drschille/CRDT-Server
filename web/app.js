@@ -29,10 +29,7 @@ const listEmptyEl = document.querySelector('#list-empty');
 const listContentEl = document.querySelector('#list-content');
 const activeListNameEl = document.querySelector('#active-list-name');
 const activeListMetaEl = document.querySelector('#active-list-meta');
-const addItemForm = document.querySelector('#add-item-form');
-const itemLabelInput = document.querySelector('#item-label');
-const itemQuantityInput = document.querySelector('#item-quantity');
-const itemVendorInput = document.querySelector('#item-vendor');
+const addItemButton = document.querySelector('#add-item-btn');
 const itemsContainer = document.querySelector('#items');
 
 const bulletinForm = document.querySelector('#bulletin-form');
@@ -50,6 +47,11 @@ const registryEntries = new Map();
 const listStates = new Map();
 let bulletins = [];
 let activeListId = null;
+
+const ITEM_SYNC_DEBOUNCE_MS = 500;
+const NEW_ITEM_PLACEHOLDER = 'New item';
+const pendingItemActions = new Map();
+let pendingNewItemFocus = null;
 
 const state = {
   activeView: 'lists',
@@ -114,6 +116,11 @@ function resetClientState(clearUI) {
   listStates.clear();
   bulletins = [];
   activeListId = null;
+  pendingNewItemFocus = null;
+  for (const entry of pendingItemActions.values()) {
+    clearTimeout(entry.timer);
+  }
+  pendingItemActions.clear();
   if (clearUI) {
     updateCurrentUser();
     renderLists();
@@ -331,6 +338,7 @@ function renderLists() {
 
 function selectList(listId) {
   activeListId = listId;
+  pendingNewItemFocus = null;
   const descriptor = { kind: 'list', listId };
   sendSubscribe(descriptor);
   requestFullState(descriptor);
@@ -346,17 +354,22 @@ function closeList() {
   sendUnsubscribe(descriptor);
   listStates.delete(activeListId);
   activeListId = null;
+  pendingNewItemFocus = null;
   renderLists();
   renderActiveList();
 }
 
 function renderActiveList() {
+  addItemButton.classList.toggle('hidden', !activeListId);
+  addItemButton.disabled = !activeListId;
+
   if (!activeListId) {
     activeListNameEl.textContent = 'Select a list';
     activeListMetaEl.textContent = '';
     listEmptyEl.textContent = 'No list selected.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
+    itemsContainer.innerHTML = '';
     return;
   }
 
@@ -367,6 +380,8 @@ function renderActiveList() {
     listEmptyEl.textContent = 'List unavailable.';
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
+    itemsContainer.innerHTML = '';
+    addItemButton.disabled = true;
     return;
   }
 
@@ -381,22 +396,42 @@ function renderActiveList() {
     listEmptyEl.classList.remove('hidden');
     listContentEl.classList.add('hidden');
     itemsContainer.innerHTML = '';
+    addItemButton.disabled = true;
     return;
   }
 
+  const canAddItems = !entry.archived;
+  addItemButton.disabled = !canAddItems;
+  addItemButton.title = canAddItems ? 'Add item' : 'Archived lists cannot be edited';
+  const listReadOnly = entry.archived;
+
   listContentEl.classList.remove('hidden');
+
+  let previousFocus = null;
+  if (document.activeElement instanceof HTMLInputElement && document.activeElement.closest('#items')) {
+    previousFocus = {
+      itemId: document.activeElement.dataset.itemId ?? null,
+      field: document.activeElement.dataset.field ?? null,
+      selectionStart: document.activeElement.selectionStart ?? undefined,
+      selectionEnd: document.activeElement.selectionEnd ?? undefined
+    };
+  }
+
   itemsContainer.innerHTML = '';
 
   if (listState.items.length === 0) {
-    listEmptyEl.textContent = 'No items yet. Use "Add" to create one.';
+    listEmptyEl.textContent = 'No items yet. Press + to add one.';
     listEmptyEl.classList.remove('hidden');
-    return;
+  } else {
+    listEmptyEl.classList.add('hidden');
   }
 
-  listEmptyEl.classList.add('hidden');
+  const currentListId = activeListId;
+  const labelInputs = new Map();
 
   for (const item of listState.items) {
     const li = document.createElement('li');
+    li.dataset.itemId = item.id;
 
     const main = document.createElement('div');
     main.className = 'item-main';
@@ -404,34 +439,167 @@ function renderActiveList() {
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = Boolean(item.checked);
-    checkbox.addEventListener('change', () =>
-      sendListAction(activeListId, {
-        type: 'toggle_item_checked',
-        itemId: item.id,
-        checked: checkbox.checked
-      })
-    );
+    checkbox.disabled = listReadOnly;
+    main.appendChild(checkbox);
 
-    const info = document.createElement('div');
-    info.className = 'item-info';
+    const fields = document.createElement('div');
+    fields.className = 'item-fields';
 
-    const label = createEditableLabel(item);
-    info.appendChild(label);
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.value = item.label;
+    labelInput.placeholder = 'Item name';
+    labelInput.maxLength = 200;
+    labelInput.className = 'item-field item-field--label';
+    labelInput.dataset.itemId = item.id;
+    labelInput.dataset.field = 'label';
+    if (item.checked) {
+      labelInput.classList.add('item-field--checked');
+    }
+
+    labelInput.disabled = listReadOnly;
+    if (!listReadOnly) {
+      labelInput.addEventListener('focus', () => {
+        labelInput.select();
+        labelInput.classList.remove('item-field--error');
+      });
+
+      labelInput.addEventListener('input', () => {
+        labelInput.classList.remove('item-field--error');
+        scheduleDebouncedItemAction(currentListId, `${item.id}:label`, () => {
+          const trimmed = labelInput.value.trim();
+          if (!trimmed || trimmed === item.label) {
+            return null;
+          }
+          return { action: { type: 'update_item', itemId: item.id, label: trimmed } };
+        });
+      });
+
+      labelInput.addEventListener('blur', () => {
+        const trimmed = labelInput.value.trim();
+        if (!trimmed) {
+          labelInput.value = item.label;
+          labelInput.classList.add('item-field--error');
+          showMessage('Item name required', true);
+          return;
+        }
+        flushDebouncedItemAction(currentListId, `${item.id}:label`);
+      });
+
+      labelInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          labelInput.blur();
+        }
+      });
+    }
+
+    fields.appendChild(labelInput);
+    labelInputs.set(item.id, labelInput);
+
+    const fieldRow = document.createElement('div');
+    fieldRow.className = 'item-field-row';
+
+    const quantityInput = document.createElement('input');
+    quantityInput.type = 'text';
+    quantityInput.value = item.quantity ?? '';
+    quantityInput.placeholder = 'Quantity';
+    quantityInput.maxLength = 200;
+    quantityInput.className = 'item-field item-field--quantity';
+    quantityInput.dataset.itemId = item.id;
+    quantityInput.dataset.field = 'quantity';
+
+    quantityInput.disabled = listReadOnly;
+    if (!listReadOnly) {
+      quantityInput.addEventListener('input', () => {
+        scheduleDebouncedItemAction(currentListId, `${item.id}:quantity`, () => {
+          const trimmed = quantityInput.value.trim();
+          const nextQuantity = trimmed || undefined;
+          const currentQuantity = item.quantity ?? undefined;
+          if (nextQuantity === currentQuantity) {
+            return null;
+          }
+          return { action: { type: 'set_item_quantity', itemId: item.id, quantity: nextQuantity } };
+        });
+      });
+
+      quantityInput.addEventListener('blur', () => {
+        flushDebouncedItemAction(currentListId, `${item.id}:quantity`);
+      });
+
+      quantityInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          quantityInput.blur();
+        }
+      });
+    }
+
+    fieldRow.appendChild(quantityInput);
+
+    const vendorInput = document.createElement('input');
+    vendorInput.type = 'text';
+    vendorInput.value = item.vendor ?? '';
+    vendorInput.placeholder = 'Vendor';
+    vendorInput.maxLength = 200;
+    vendorInput.className = 'item-field item-field--vendor';
+    vendorInput.dataset.itemId = item.id;
+    vendorInput.dataset.field = 'vendor';
+
+    vendorInput.disabled = listReadOnly;
+    if (!listReadOnly) {
+      vendorInput.addEventListener('input', () => {
+        scheduleDebouncedItemAction(currentListId, `${item.id}:vendor`, () => {
+          const trimmed = vendorInput.value.trim();
+          const nextVendor = trimmed || undefined;
+          const currentVendor = item.vendor ?? undefined;
+          if (nextVendor === currentVendor) {
+            return null;
+          }
+          return { action: { type: 'set_item_vendor', itemId: item.id, vendor: nextVendor } };
+        });
+      });
+
+      vendorInput.addEventListener('blur', () => {
+        flushDebouncedItemAction(currentListId, `${item.id}:vendor`);
+      });
+
+      vendorInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          vendorInput.blur();
+        }
+      });
+    }
+
+    fieldRow.appendChild(vendorInput);
+
+    fields.appendChild(fieldRow);
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
-    meta.appendChild(createMetaEntry(`Added by ${item.addedBy}`));
-    meta.appendChild(createEditableQuantity(item));
-    if (item.vendor) {
-      meta.appendChild(createMetaEntry(`Vendor: ${item.vendor}`));
-    }
-    if (item.notes) {
-      meta.appendChild(createMetaEntry(`Notes: ${item.notes}`));
-    }
-    info.appendChild(meta);
+    meta.textContent = `Added by ${item.addedBy}`;
+    fields.appendChild(meta);
 
-    main.appendChild(checkbox);
-    main.appendChild(info);
+    if (item.notes) {
+      const notes = document.createElement('div');
+      notes.className = 'item-notes';
+      notes.textContent = `Notes: ${item.notes}`;
+      fields.appendChild(notes);
+    }
+
+    if (!listReadOnly) {
+      checkbox.addEventListener('change', () => {
+        labelInput.classList.toggle('item-field--checked', checkbox.checked);
+        sendListAction(currentListId, {
+          type: 'toggle_item_checked',
+          itemId: item.id,
+          checked: checkbox.checked
+        });
+      });
+    }
+
+    main.appendChild(fields);
 
     const actions = document.createElement('div');
     actions.className = 'item-actions';
@@ -441,9 +609,12 @@ function renderActiveList() {
     removeBtn.className = 'icon-btn';
     removeBtn.setAttribute('aria-label', 'Remove item');
     removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', () =>
-      sendListAction(activeListId, { type: 'remove_item', itemId: item.id })
-    );
+    removeBtn.disabled = listReadOnly;
+    if (!listReadOnly) {
+      removeBtn.addEventListener('click', () =>
+        sendListAction(currentListId, { type: 'remove_item', itemId: item.id })
+      );
+    }
 
     actions.appendChild(removeBtn);
 
@@ -451,217 +622,37 @@ function renderActiveList() {
     li.appendChild(actions);
     itemsContainer.appendChild(li);
   }
-}
-
-function createEditableLabel(item) {
-  const label = document.createElement('span');
-  label.className = 'item-label item-label--editable';
-  if (item.checked) {
-    label.classList.add('checked');
-  }
-  label.textContent = item.label;
-  label.title = 'Click to edit';
-  label.tabIndex = 0;
-
-  let isEditing = false;
-
-  const startEdit = () => {
-    if (isEditing) {
-      return;
-    }
-    isEditing = true;
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = item.label;
-    input.className = 'item-label-input';
-    input.setAttribute('aria-label', 'Edit item name');
-    label.replaceWith(input);
-    input.focus();
-    input.select();
-
-    const finish = (commitChanges, focusLabel) => {
-      input.replaceWith(label);
-      if (commitChanges) {
-        const trimmed = input.value.trim();
-        label.textContent = trimmed || item.label;
-      } else {
-        label.textContent = item.label;
-      }
-      label.classList.toggle('checked', Boolean(item.checked));
-      if (focusLabel) {
-        label.focus();
-      }
-      isEditing = false;
-    };
-
-    const commit = ({ focus } = {}) => {
-      const nextLabel = input.value.trim();
-      if (!nextLabel) {
-        showMessage('Item name required', true);
-        input.focus();
-        input.select();
-        return;
-      }
-      finish(true, focus);
-      if (nextLabel !== item.label) {
-        const previousLabel = item.label;
-        item.label = nextLabel;
-        try {
-          sendListAction(activeListId, { type: 'update_item', itemId: item.id, label: nextLabel });
-        } catch (error) {
-          item.label = previousLabel;
-          label.textContent = previousLabel;
-          showMessage(error instanceof Error ? error.message : String(error), true);
-        }
-      }
-    };
-
-    const cancel = ({ focus } = {}) => {
-      finish(false, focus);
-    };
-
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        commit({ focus: true });
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        cancel({ focus: true });
-      }
-    });
-
-    input.addEventListener('blur', () => {
-      if (isEditing) {
-        commit();
-      }
-    });
-  };
-
-  label.addEventListener('click', startEdit);
-  label.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      startEdit();
-    }
-  });
-
-  return label;
-}
-
-function createEditableQuantity(item) {
-  const entry = document.createElement('span');
-  entry.className = 'item-meta__entry item-meta__entry--editable item-meta__entry--quantity';
-  entry.tabIndex = 0;
-  entry.title = 'Click to edit quantity';
-
-  const updateDisplay = () => {
-    if (item.quantity) {
-      entry.textContent = `Qty: ${item.quantity}`;
-      entry.classList.remove('item-meta__entry--empty');
-    } else {
-      entry.textContent = 'Add quantity';
-      entry.classList.add('item-meta__entry--empty');
-    }
-  };
-
-  let isEditing = false;
-
-  const startEdit = () => {
-    if (isEditing) {
-      return;
-    }
-    isEditing = true;
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = item.quantity ?? '';
-    input.className = 'item-meta-input';
-    input.placeholder = 'Quantity';
-    input.setAttribute('aria-label', 'Edit item quantity');
-    entry.replaceWith(input);
-    input.focus();
-    input.select();
-
-    const stopEdit = ({ focus }) => {
-      input.replaceWith(entry);
-      updateDisplay();
-      if (focus) {
-        entry.focus();
-      }
-      isEditing = false;
-    };
-
-    const commit = ({ focus } = {}) => {
-      const trimmed = input.value.trim();
-      const nextQuantity = trimmed || undefined;
-      const currentQuantity = item.quantity;
-      if (nextQuantity) {
-        item.quantity = nextQuantity;
-      } else {
-        delete item.quantity;
-      }
-      stopEdit({ focus });
-      const currentValue = currentQuantity ?? undefined;
-      if ((nextQuantity ?? undefined) === currentValue) {
-        updateDisplay();
-        return;
-      }
-      try {
-        sendListAction(activeListId, {
-          type: 'set_item_quantity',
-          itemId: item.id,
-          quantity: nextQuantity
+  if (pendingNewItemFocus && pendingNewItemFocus.listId === currentListId) {
+    const created = listState.items.find((it) => !pendingNewItemFocus.previousIds.has(it.id));
+    if (created) {
+      const focusInput = labelInputs.get(created.id);
+      if (focusInput) {
+        requestAnimationFrame(() => {
+          focusInput.focus();
+          focusInput.select();
         });
-      } catch (error) {
-        if (currentQuantity) {
-          item.quantity = currentQuantity;
-        } else {
-          delete item.quantity;
-        }
-        updateDisplay();
-        showMessage(error instanceof Error ? error.message : String(error), true);
       }
-    };
-
-    const cancel = ({ focus } = {}) => {
-      stopEdit({ focus });
-    };
-
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        commit({ focus: true });
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        cancel({ focus: true });
-      }
-    });
-
-    input.addEventListener('blur', () => {
-      if (isEditing) {
-        commit();
-      }
-    });
-  };
-
-  entry.addEventListener('click', startEdit);
-  entry.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      startEdit();
+      pendingNewItemFocus = null;
+      return;
     }
-  });
+  }
 
-  updateDisplay();
-  return entry;
-}
-
-function createMetaEntry(text) {
-  const span = document.createElement('span');
-  span.className = 'item-meta__entry';
-  span.textContent = text;
-  return span;
+  if (previousFocus && previousFocus.itemId && previousFocus.field) {
+    const selector = `input[data-item-id="${previousFocus.itemId}"][data-field="${previousFocus.field}"]`;
+    const target = itemsContainer.querySelector(selector);
+    if (target instanceof HTMLInputElement && !target.disabled) {
+      requestAnimationFrame(() => {
+        target.focus();
+        if (previousFocus.selectionStart !== undefined && previousFocus.selectionEnd !== undefined) {
+          try {
+            target.setSelectionRange(previousFocus.selectionStart, previousFocus.selectionEnd);
+          } catch {
+            // ignore browsers that disallow restoring selection
+          }
+        }
+      });
+    }
+  }
 }
 
 function renderBulletins() {
@@ -801,6 +792,57 @@ function parseServerDescriptor(docSelector) {
   throw new Error('Unknown document selector');
 }
 
+function scheduleDebouncedItemAction(listId, key, build) {
+  if (!listId) {
+    return;
+  }
+  const mapKey = `${listId}:${key}`;
+  const existing = pendingItemActions.get(mapKey);
+  if (existing) {
+    clearTimeout(existing.timer);
+  }
+  const timer = window.setTimeout(() => {
+    runPendingItemAction(mapKey);
+  }, ITEM_SYNC_DEBOUNCE_MS);
+  pendingItemActions.set(mapKey, { timer, listId, build });
+}
+
+function flushDebouncedItemAction(listId, key) {
+  if (!listId) {
+    return;
+  }
+  const mapKey = `${listId}:${key}`;
+  const entry = pendingItemActions.get(mapKey);
+  if (!entry) {
+    return;
+  }
+  clearTimeout(entry.timer);
+  runPendingItemAction(mapKey);
+}
+
+function runPendingItemAction(mapKey) {
+  const entry = pendingItemActions.get(mapKey);
+  if (!entry) {
+    return;
+  }
+  pendingItemActions.delete(mapKey);
+  const result = entry.build();
+  if (!result) {
+    return;
+  }
+  if ('error' in result) {
+    if (result.error) {
+      showMessage(result.error, true);
+    }
+    return;
+  }
+  try {
+    sendListAction(entry.listId, result.action);
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
 function sendRegistryAction(action) {
   ensureSocketOpen();
   socket.send(JSON.stringify({ type: 'registry_action', action }));
@@ -895,31 +937,22 @@ createListForm.addEventListener('submit', (event) => {
   }
 });
 
-addItemForm.addEventListener('submit', (event) => {
-  event.preventDefault();
+addItemButton.addEventListener('click', () => {
   if (!activeListId) {
     showMessage('Select a list first', true);
     return;
   }
-  const label = itemLabelInput.value.trim();
-  const quantity = itemQuantityInput.value.trim();
-  const vendor = itemVendorInput.value.trim();
-  if (!label) {
-    showMessage('Item name required', true);
-    return;
-  }
+  const listState = listStates.get(activeListId);
+  const existingIds = new Set((listState?.items ?? []).map((item) => item.id));
   try {
+    pendingNewItemFocus = { listId: activeListId, previousIds: existingIds };
     sendListAction(activeListId, {
       type: 'add_item',
-      label,
-      quantity: quantity || undefined,
-      vendor: vendor || undefined
+      label: NEW_ITEM_PLACEHOLDER
     });
-    itemLabelInput.value = '';
-    itemQuantityInput.value = '';
-    itemVendorInput.value = '';
   } catch (error) {
-    showMessage(error.message, true);
+    pendingNewItemFocus = null;
+    showMessage(error instanceof Error ? error.message : String(error), true);
   }
 });
 

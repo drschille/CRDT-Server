@@ -318,6 +318,7 @@ button:not(:disabled):hover {
   display: flex;
   align-items: flex-start;
   gap: 0.75rem;
+  width: 100%;
 }
 
 .item-main input[type='checkbox'] {
@@ -326,38 +327,53 @@ button:not(:disabled):hover {
   margin-top: 0.25rem;
 }
 
-.item-info {
+.item-fields {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.4rem;
+  width: 100%;
 }
 
-.item-label {
+.item-field {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+.item-field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.item-field--label {
   font-weight: 600;
 }
 
-.item-label--editable {
-  cursor: text;
+.item-field--label.item-field--checked {
+  text-decoration: line-through;
+  color: #94a3b8;
 }
 
-.item-label--editable:focus-visible {
+.item-field--quantity,
+.item-field--vendor {
+  flex: 0 1 150px;
+  min-width: 120px;
+}
+
+.item-field--label {
+  width: 100%;
+}
+
+.item-field:focus-visible {
   outline: 2px solid #38bdf8;
   outline-offset: 2px;
 }
 
-.item-label-input {
-  font: inherit;
-  font-weight: 600;
-  padding: 0.1rem 0.3rem;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.item-label.checked {
-  text-decoration: line-through;
-  color: #94a3b8;
+.item-field--error {
+  border-color: #f87171;
 }
 
 .item-meta {
@@ -366,6 +382,15 @@ button:not(:disabled):hover {
   display: flex;
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+.item-notes {
+  font-size: 0.85rem;
+  color: #475569;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  word-break: break-word;
 }
 
 .item-meta__entry {
@@ -401,6 +426,26 @@ button:not(:disabled):hover {
 .item-actions {
   display: flex;
   gap: 0.5rem;
+}
+
+.add-item-btn {
+  align-self: flex-start;
+  background: #2563eb;
+  color: white;
+  border-radius: 999px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.add-item-btn:disabled {
+  background: #94a3b8;
+  transform: none;
+  box-shadow: none;
 }
 
 .icon-btn {
