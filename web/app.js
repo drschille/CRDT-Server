@@ -53,6 +53,8 @@ const NEW_ITEM_PLACEHOLDER = 'New item';
 const pendingItemActions = new Map();
 let pendingNewItemFocus = null;
 
+const renderedItemSnapshots = new Map();
+
 const state = {
   activeView: 'lists',
   isLoggingOut: false,
@@ -70,6 +72,146 @@ function showMessage(text, isError = false) {
   messagesEl.classList.toggle('messages--error', isError);
   if (!text) {
     messagesEl.classList.remove('messages--error');
+  }
+}
+
+function createListItemElement(itemId) {
+  const li = document.createElement('li');
+  li.dataset.itemId = itemId;
+
+  const main = document.createElement('div');
+  main.className = 'item-main';
+  li.appendChild(main);
+
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'item-checkbox';
+  checkbox.dataset.itemId = itemId;
+  checkbox.addEventListener('change', handleCheckboxChange);
+  main.appendChild(checkbox);
+
+  const fields = document.createElement('div');
+  fields.className = 'item-fields';
+  main.appendChild(fields);
+
+  const labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.placeholder = 'Item name';
+  labelInput.maxLength = 200;
+  labelInput.className = 'item-field item-field--label';
+  labelInput.dataset.itemId = itemId;
+  labelInput.dataset.field = 'label';
+  labelInput.addEventListener('focus', handleLabelFocus);
+  labelInput.addEventListener('input', handleLabelInput);
+  labelInput.addEventListener('blur', handleLabelBlur);
+  labelInput.addEventListener('keydown', handleLabelKeyDown);
+  fields.appendChild(labelInput);
+
+  const fieldRow = document.createElement('div');
+  fieldRow.className = 'item-field-row';
+  fields.appendChild(fieldRow);
+
+  const quantityInput = document.createElement('input');
+  quantityInput.type = 'text';
+  quantityInput.placeholder = 'Quantity';
+  quantityInput.maxLength = 200;
+  quantityInput.className = 'item-field item-field--quantity';
+  quantityInput.dataset.itemId = itemId;
+  quantityInput.dataset.field = 'quantity';
+  quantityInput.addEventListener('input', handleQuantityInput);
+  quantityInput.addEventListener('blur', handleQuantityBlur);
+  quantityInput.addEventListener('keydown', handleEditableKeyDown);
+  fieldRow.appendChild(quantityInput);
+
+  const vendorInput = document.createElement('input');
+  vendorInput.type = 'text';
+  vendorInput.placeholder = 'Vendor';
+  vendorInput.maxLength = 200;
+  vendorInput.className = 'item-field item-field--vendor';
+  vendorInput.dataset.itemId = itemId;
+  vendorInput.dataset.field = 'vendor';
+  vendorInput.addEventListener('input', handleVendorInput);
+  vendorInput.addEventListener('blur', handleVendorBlur);
+  vendorInput.addEventListener('keydown', handleEditableKeyDown);
+  fieldRow.appendChild(vendorInput);
+
+  const meta = document.createElement('div');
+  meta.className = 'item-meta';
+  fields.appendChild(meta);
+
+  const notes = document.createElement('div');
+  notes.className = 'item-notes hidden';
+  notes.dataset.role = 'notes';
+  fields.appendChild(notes);
+
+  const actions = document.createElement('div');
+  actions.className = 'item-actions';
+  li.appendChild(actions);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'icon-btn';
+  removeBtn.setAttribute('aria-label', 'Remove item');
+  removeBtn.textContent = '✕';
+  removeBtn.dataset.itemId = itemId;
+  removeBtn.addEventListener('click', handleRemoveClick);
+  actions.appendChild(removeBtn);
+
+  return li;
+}
+
+function updateListItemElement(li, item, listReadOnly) {
+  li.dataset.itemId = item.id;
+
+  const checkbox = li.querySelector('.item-checkbox');
+  if (checkbox instanceof HTMLInputElement) {
+    checkbox.dataset.itemId = item.id;
+    checkbox.checked = Boolean(item.checked);
+    checkbox.disabled = listReadOnly;
+  }
+
+  const labelInput = li.querySelector('input[data-field="label"]');
+  if (labelInput instanceof HTMLInputElement) {
+    labelInput.dataset.itemId = item.id;
+    labelInput.disabled = listReadOnly;
+    labelInput.classList.toggle('item-field--checked', Boolean(item.checked));
+    setInputValuePreserveCaret(labelInput, item.label);
+  }
+
+  const quantityInput = li.querySelector('input[data-field="quantity"]');
+  if (quantityInput instanceof HTMLInputElement) {
+    quantityInput.dataset.itemId = item.id;
+    quantityInput.disabled = listReadOnly;
+    setInputValuePreserveCaret(quantityInput, item.quantity ?? '');
+  }
+
+  const vendorInput = li.querySelector('input[data-field="vendor"]');
+  if (vendorInput instanceof HTMLInputElement) {
+    vendorInput.dataset.itemId = item.id;
+    vendorInput.disabled = listReadOnly;
+    setInputValuePreserveCaret(vendorInput, item.vendor ?? '');
+  }
+
+  const meta = li.querySelector('.item-meta');
+  if (meta) {
+    meta.textContent = `Added by ${item.addedBy}`;
+  }
+
+  const notes = li.querySelector('.item-notes');
+  if (notes) {
+    if (item.notes) {
+      notes.textContent = `Notes: ${item.notes}`;
+      notes.classList.remove('hidden');
+    } else {
+      notes.textContent = '';
+      notes.classList.add('hidden');
+    }
+  }
+
+  const removeBtn = li.querySelector('.icon-btn');
+  if (removeBtn instanceof HTMLButtonElement) {
+    removeBtn.dataset.itemId = item.id;
+    removeBtn.disabled = listReadOnly;
   }
 }
 
@@ -121,6 +263,7 @@ function resetClientState(clearUI) {
     clearTimeout(entry.timer);
   }
   pendingItemActions.clear();
+  renderedItemSnapshots.clear();
   if (clearUI) {
     updateCurrentUser();
     renderLists();
@@ -407,17 +550,13 @@ function renderActiveList() {
 
   listContentEl.classList.remove('hidden');
 
-  let previousFocus = null;
-  if (document.activeElement instanceof HTMLInputElement && document.activeElement.closest('#items')) {
-    previousFocus = {
-      itemId: document.activeElement.dataset.itemId ?? null,
-      field: document.activeElement.dataset.field ?? null,
-      selectionStart: document.activeElement.selectionStart ?? undefined,
-      selectionEnd: document.activeElement.selectionEnd ?? undefined
-    };
+  const currentListId = activeListId;
+  const existingItems = new Map();
+  for (const li of itemsContainer.querySelectorAll('li[data-item-id]')) {
+    existingItems.set(li.dataset.itemId ?? '', li);
   }
 
-  itemsContainer.innerHTML = '';
+  const seenIds = new Set();
 
   if (listState.items.length === 0) {
     listEmptyEl.textContent = 'No items yet. Press + to add one.';
@@ -426,231 +565,307 @@ function renderActiveList() {
     listEmptyEl.classList.add('hidden');
   }
 
-  const currentListId = activeListId;
-  const labelInputs = new Map();
-
   for (const item of listState.items) {
-    const li = document.createElement('li');
-    li.dataset.itemId = item.id;
-
-    const main = document.createElement('div');
-    main.className = 'item-main';
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = Boolean(item.checked);
-    checkbox.disabled = listReadOnly;
-    main.appendChild(checkbox);
-
-    const fields = document.createElement('div');
-    fields.className = 'item-fields';
-
-    const labelInput = document.createElement('input');
-    labelInput.type = 'text';
-    labelInput.value = item.label;
-    labelInput.placeholder = 'Item name';
-    labelInput.maxLength = 200;
-    labelInput.className = 'item-field item-field--label';
-    labelInput.dataset.itemId = item.id;
-    labelInput.dataset.field = 'label';
-    if (item.checked) {
-      labelInput.classList.add('item-field--checked');
+    seenIds.add(item.id);
+    let li = existingItems.get(item.id);
+    const isNew = !li;
+    if (!li) {
+      li = createListItemElement(item.id);
     }
-
-    labelInput.disabled = listReadOnly;
-    if (!listReadOnly) {
-      labelInput.addEventListener('focus', () => {
-        labelInput.select();
-        labelInput.classList.remove('item-field--error');
-      });
-
-      labelInput.addEventListener('input', () => {
-        labelInput.classList.remove('item-field--error');
-        scheduleDebouncedItemAction(currentListId, `${item.id}:label`, () => {
-          const trimmed = labelInput.value.trim();
-          if (!trimmed || trimmed === item.label) {
-            return null;
-          }
-          return { action: { type: 'update_item', itemId: item.id, label: trimmed } };
-        });
-      });
-
-      labelInput.addEventListener('blur', () => {
-        const trimmed = labelInput.value.trim();
-        if (!trimmed) {
-          labelInput.value = item.label;
-          labelInput.classList.add('item-field--error');
-          showMessage('Item name required', true);
-          return;
-        }
-        flushDebouncedItemAction(currentListId, `${item.id}:label`);
-      });
-
-      labelInput.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          labelInput.blur();
-        }
-      });
-    }
-
-    fields.appendChild(labelInput);
-    labelInputs.set(item.id, labelInput);
-
-    const fieldRow = document.createElement('div');
-    fieldRow.className = 'item-field-row';
-
-    const quantityInput = document.createElement('input');
-    quantityInput.type = 'text';
-    quantityInput.value = item.quantity ?? '';
-    quantityInput.placeholder = 'Quantity';
-    quantityInput.maxLength = 200;
-    quantityInput.className = 'item-field item-field--quantity';
-    quantityInput.dataset.itemId = item.id;
-    quantityInput.dataset.field = 'quantity';
-
-    quantityInput.disabled = listReadOnly;
-    if (!listReadOnly) {
-      quantityInput.addEventListener('input', () => {
-        scheduleDebouncedItemAction(currentListId, `${item.id}:quantity`, () => {
-          const trimmed = quantityInput.value.trim();
-          const nextQuantity = trimmed || undefined;
-          const currentQuantity = item.quantity ?? undefined;
-          if (nextQuantity === currentQuantity) {
-            return null;
-          }
-          return { action: { type: 'set_item_quantity', itemId: item.id, quantity: nextQuantity } };
-        });
-      });
-
-      quantityInput.addEventListener('blur', () => {
-        flushDebouncedItemAction(currentListId, `${item.id}:quantity`);
-      });
-
-      quantityInput.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          quantityInput.blur();
-        }
-      });
-    }
-
-    fieldRow.appendChild(quantityInput);
-
-    const vendorInput = document.createElement('input');
-    vendorInput.type = 'text';
-    vendorInput.value = item.vendor ?? '';
-    vendorInput.placeholder = 'Vendor';
-    vendorInput.maxLength = 200;
-    vendorInput.className = 'item-field item-field--vendor';
-    vendorInput.dataset.itemId = item.id;
-    vendorInput.dataset.field = 'vendor';
-
-    vendorInput.disabled = listReadOnly;
-    if (!listReadOnly) {
-      vendorInput.addEventListener('input', () => {
-        scheduleDebouncedItemAction(currentListId, `${item.id}:vendor`, () => {
-          const trimmed = vendorInput.value.trim();
-          const nextVendor = trimmed || undefined;
-          const currentVendor = item.vendor ?? undefined;
-          if (nextVendor === currentVendor) {
-            return null;
-          }
-          return { action: { type: 'set_item_vendor', itemId: item.id, vendor: nextVendor } };
-        });
-      });
-
-      vendorInput.addEventListener('blur', () => {
-        flushDebouncedItemAction(currentListId, `${item.id}:vendor`);
-      });
-
-      vendorInput.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          vendorInput.blur();
-        }
-      });
-    }
-
-    fieldRow.appendChild(vendorInput);
-
-    fields.appendChild(fieldRow);
-
-    const meta = document.createElement('div');
-    meta.className = 'item-meta';
-    meta.textContent = `Added by ${item.addedBy}`;
-    fields.appendChild(meta);
-
-    if (item.notes) {
-      const notes = document.createElement('div');
-      notes.className = 'item-notes';
-      notes.textContent = `Notes: ${item.notes}`;
-      fields.appendChild(notes);
-    }
-
-    if (!listReadOnly) {
-      checkbox.addEventListener('change', () => {
-        labelInput.classList.toggle('item-field--checked', checkbox.checked);
-        sendListAction(currentListId, {
-          type: 'toggle_item_checked',
-          itemId: item.id,
-          checked: checkbox.checked
-        });
-      });
-    }
-
-    main.appendChild(fields);
-
-    const actions = document.createElement('div');
-    actions.className = 'item-actions';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'icon-btn';
-    removeBtn.setAttribute('aria-label', 'Remove item');
-    removeBtn.textContent = '✕';
-    removeBtn.disabled = listReadOnly;
-    if (!listReadOnly) {
-      removeBtn.addEventListener('click', () =>
-        sendListAction(currentListId, { type: 'remove_item', itemId: item.id })
-      );
-    }
-
-    actions.appendChild(removeBtn);
-
-    li.appendChild(main);
-    li.appendChild(actions);
+    updateListItemElement(li, item, listReadOnly);
     itemsContainer.appendChild(li);
+    setRenderedItemSnapshot(currentListId, item);
+    if (isNew) {
+      li.dataset.justAdded = 'true';
+    } else {
+      delete li.dataset.justAdded;
+    }
   }
+
+  for (const [itemId, li] of existingItems) {
+    if (!seenIds.has(itemId)) {
+      li.remove();
+      if (currentListId) {
+        renderedItemSnapshots.delete(makeItemKey(currentListId, itemId));
+      }
+    }
+  }
+
   if (pendingNewItemFocus && pendingNewItemFocus.listId === currentListId) {
     const created = listState.items.find((it) => !pendingNewItemFocus.previousIds.has(it.id));
     if (created) {
-      const focusInput = labelInputs.get(created.id);
-      if (focusInput) {
+      const li = itemsContainer.querySelector(`li[data-item-id="${created.id}"]`);
+      const focusInput = li?.querySelector('input[data-field="label"]');
+      if (focusInput instanceof HTMLInputElement) {
         requestAnimationFrame(() => {
           focusInput.focus();
           focusInput.select();
         });
       }
       pendingNewItemFocus = null;
-      return;
     }
   }
+}
 
-  if (previousFocus && previousFocus.itemId && previousFocus.field) {
-    const selector = `input[data-item-id="${previousFocus.itemId}"][data-field="${previousFocus.field}"]`;
-    const target = itemsContainer.querySelector(selector);
-    if (target instanceof HTMLInputElement && !target.disabled) {
-      requestAnimationFrame(() => {
-        target.focus();
-        if (previousFocus.selectionStart !== undefined && previousFocus.selectionEnd !== undefined) {
-          try {
-            target.setSelectionRange(previousFocus.selectionStart, previousFocus.selectionEnd);
-          } catch {
-            // ignore browsers that disallow restoring selection
-          }
-        }
-      });
+function handleLabelFocus(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  input.select();
+  input.classList.remove('item-field--error');
+}
+
+function handleLabelInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  input.classList.remove('item-field--error');
+  scheduleDebouncedItemAction(listId, `${itemId}:label`, () => {
+    const trimmed = input.value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    if (snapshot && trimmed === snapshot.label) {
+      return null;
+    }
+    return { action: { type: 'update_item', itemId, label: trimmed } };
+  });
+}
+
+function handleLabelBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  const trimmed = input.value.trim();
+  if (!trimmed) {
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    input.value = snapshot?.label ?? '';
+    input.classList.add('item-field--error');
+    showMessage('Item name required', true);
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:label`);
+}
+
+function handleLabelKeyDown(event) {
+  if (!(event.currentTarget instanceof HTMLInputElement)) {
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.currentTarget.blur();
+  } else if (event.key === 'Escape') {
+    const listId = activeListId;
+    const itemId = event.currentTarget.dataset.itemId;
+    if (!listId || !itemId) {
+      return;
+    }
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    if (snapshot) {
+      event.currentTarget.value = snapshot.label;
+      event.currentTarget.classList.remove('item-field--error');
+      event.currentTarget.blur();
+    }
+  }
+}
+
+function handleQuantityInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  scheduleDebouncedItemAction(listId, `${itemId}:quantity`, () => {
+    const trimmed = input.value.trim();
+    const nextValue = trimmed;
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    const previous = snapshot?.quantity ?? '';
+    if (nextValue === previous) {
+      return null;
+    }
+    return {
+      action: {
+        type: 'set_item_quantity',
+        itemId,
+        quantity: trimmed ? trimmed : undefined
+      }
+    };
+  });
+}
+
+function handleQuantityBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:quantity`);
+}
+
+function handleVendorInput(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  scheduleDebouncedItemAction(listId, `${itemId}:vendor`, () => {
+    const trimmed = input.value.trim();
+    const nextValue = trimmed;
+    const snapshot = getRenderedItemSnapshot(listId, itemId);
+    const previous = snapshot?.vendor ?? '';
+    if (nextValue === previous) {
+      return null;
+    }
+    return {
+      action: {
+        type: 'set_item_vendor',
+        itemId,
+        vendor: trimmed ? trimmed : undefined
+      }
+    };
+  });
+}
+
+function handleVendorBlur(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  const listId = activeListId;
+  const itemId = input.dataset.itemId;
+  if (!listId || !itemId) {
+    return;
+  }
+  flushDebouncedItemAction(listId, `${itemId}:vendor`);
+}
+
+function handleEditableKeyDown(event) {
+  if (!(event.currentTarget instanceof HTMLInputElement)) {
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+}
+
+function handleCheckboxChange(event) {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement) || input.disabled) {
+    return;
+  }
+  if (!activeListId) {
+    return;
+  }
+  const itemId = input.dataset.itemId;
+  if (!itemId) {
+    return;
+  }
+  const labelInput = itemsContainer.querySelector(`input[data-item-id="${itemId}"][data-field="label"]`);
+  if (labelInput instanceof HTMLInputElement) {
+    labelInput.classList.toggle('item-field--checked', input.checked);
+  }
+  try {
+    sendListAction(activeListId, {
+      type: 'toggle_item_checked',
+      itemId,
+      checked: input.checked
+    });
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function handleRemoveClick(event) {
+  const button = event.currentTarget;
+  if (!(button instanceof HTMLButtonElement) || button.disabled) {
+    return;
+  }
+  if (!activeListId) {
+    return;
+  }
+  const itemId = button.dataset.itemId;
+  if (!itemId) {
+    return;
+  }
+  try {
+    sendListAction(activeListId, { type: 'remove_item', itemId });
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function setRenderedItemSnapshot(listId, item) {
+  if (!listId) {
+    return;
+  }
+  renderedItemSnapshots.set(makeItemKey(listId, item.id), {
+    label: item.label,
+    quantity: item.quantity ?? '',
+    vendor: item.vendor ?? '',
+    checked: Boolean(item.checked)
+  });
+}
+
+function getRenderedItemSnapshot(listId, itemId) {
+  if (!listId) {
+    return undefined;
+  }
+  return renderedItemSnapshots.get(makeItemKey(listId, itemId));
+}
+
+function makeItemKey(listId, itemId) {
+  return `${listId}:${itemId}`;
+}
+
+function setInputValuePreserveCaret(input, nextValue) {
+  if (input.value === nextValue) {
+    return;
+  }
+  const isFocused = document.activeElement === input;
+  let selectionStart = null;
+  let selectionEnd = null;
+  if (isFocused) {
+    selectionStart = input.selectionStart;
+    selectionEnd = input.selectionEnd;
+  }
+  input.value = nextValue;
+  if (isFocused && selectionStart !== null && selectionStart !== undefined) {
+    const start = Math.min(nextValue.length, selectionStart);
+    const end =
+      selectionEnd !== null && selectionEnd !== undefined
+        ? Math.min(nextValue.length, selectionEnd)
+        : start;
+    try {
+      input.setSelectionRange(start, end);
+    } catch {
+      // Ignore browsers that disallow manually setting the selection.
     }
   }
 }
