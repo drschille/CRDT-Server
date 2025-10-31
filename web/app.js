@@ -150,6 +150,8 @@ function connectWithCredentials(creds) {
   socket.addEventListener('open', () => {
     setConnectedState(true);
     showAppShell();
+    socket.send(JSON.stringify({ type: 'hello', clientVersion: 'web-1.0-lists' }));
+    showMessage('Connected');
   });
 
   socket.addEventListener('message', (event) => {
@@ -163,11 +165,7 @@ function connectWithCredentials(creds) {
 
   socket.addEventListener('close', () => {
     setConnectedState(false);
-    if (state.isLoggingOut) {
-      showMessage('Logged out');
-    } else {
-      showMessage('Disconnected from server', true);
-    }
+    showMessage(state.isLoggingOut ? 'Logged out' : 'Disconnected from server', !state.isLoggingOut);
     resetClientState(true);
     showAuthScreen();
     state.isLoggingOut = false;
@@ -193,6 +191,19 @@ function buildConnectUrl(serverUrl, username) {
   } catch {
     throw new Error('Invalid server URL');
   }
+
+  if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+    parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+  }
+
+  if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+    throw new Error('Server URL must begin with ws://, wss://, http://, or https://');
+  }
+
+  if (!parsed.pathname || parsed.pathname === '/') {
+    parsed.pathname = '/ws';
+  }
+
   if (username) {
     parsed.searchParams.set('username', username.trim().toLowerCase());
   } else {
