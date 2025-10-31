@@ -199,7 +199,13 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
               if (!consumeRateLimit(connection, RATE_LIMIT_COST_SYNC)) {
                 return;
               }
-              await handleSyncMessage(connection, context, parseDocSelector(message.doc), message.data);
+              await handleSyncMessage(
+                connection,
+                connections,
+                context,
+                parseDocSelector(message.doc),
+                message.data
+              );
               break;
             case 'request_full_state':
               if (message.doc) {
@@ -509,8 +515,9 @@ function flushSync(connection: Connection, context: ServerContext, descriptor: D
   }
 }
 
-async function handleSyncMessage(
+export async function handleSyncMessage(
   connection: Connection,
+  connections: Set<Connection>,
   context: ServerContext,
   descriptor: DocDescriptor,
   base64: string
@@ -564,18 +571,32 @@ async function handleSyncMessage(
 
   subscription.syncState = nextSyncState;
 
+  let updatedDescriptor: DocDescriptor | undefined;
+
   switch (descriptor.kind) {
     case 'registry':
       context.registryDoc = nextDoc as Automerge.Doc<ListRegistryDoc>;
+      await saveRegistryDoc(context.registryDoc);
+      updatedDescriptor = { kind: 'registry' };
       break;
     case 'bulletins':
       context.bulletinsDoc = nextDoc as Automerge.Doc<BulletinDoc>;
+      await saveBulletinDoc(context.bulletinsDoc);
+      updatedDescriptor = { kind: 'bulletins' };
       break;
-    case 'list':
-      context.listDocs.set(descriptor.listId, nextDoc as Automerge.Doc<ShoppingListDoc>);
+    case 'list': {
+      const nextListDoc = nextDoc as Automerge.Doc<ShoppingListDoc>;
+      context.listDocs.set(descriptor.listId, nextListDoc);
+      await saveListDoc(descriptor.listId, nextListDoc);
+      updatedDescriptor = { kind: 'list', listId: descriptor.listId };
       break;
+    }
     default:
       break;
+  }
+
+  if (updatedDescriptor) {
+    broadcastDoc(connections, context, updatedDescriptor);
   }
 }
 
