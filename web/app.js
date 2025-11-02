@@ -18,6 +18,7 @@ const connectionLabelEl = document.querySelector('#connection-label');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
 const statusBar = document.querySelector('#app-status');
+const rootEl = document.querySelector('.root');
 
 const listsContainer = document.querySelector('#lists');
 const listsEmptyState = document.querySelector('#lists-empty');
@@ -32,6 +33,7 @@ const activeListNameEl = document.querySelector('#active-list-name');
 const activeListMetaEl = document.querySelector('#active-list-meta');
 const addItemButton = document.querySelector('#add-item-btn');
 const itemsContainer = document.querySelector('#items');
+const listsLayoutEl = document.querySelector('.lists-layout');
 
 const bulletinForm = document.querySelector('#bulletin-form');
 const bulletinTextInput = document.querySelector('#bulletin-text');
@@ -62,6 +64,34 @@ const state = {
   credentials: null
 };
 
+const COMPACT_LIST_QUERY = '(max-width: 1024px)';
+const compactLayoutQuery = window.matchMedia
+  ? window.matchMedia(COMPACT_LIST_QUERY)
+  : { matches: false };
+
+function updateResponsiveListLayout() {
+  if (!closeListBtn || !listsLayoutEl) {
+    return;
+  }
+  const isCompact = compactLayoutQuery.matches;
+  const hasActiveList = Boolean(activeListId);
+
+  listsLayoutEl.classList.toggle('lists-layout--compact', isCompact);
+  listsLayoutEl.classList.toggle('lists-layout--show-detail', isCompact && hasActiveList);
+
+  closeListBtn.textContent = isCompact ? 'Back to lists' : 'Close';
+  closeListBtn.setAttribute('aria-label', isCompact ? 'Back to lists' : 'Close list');
+  closeListBtn.classList.toggle('list-detail__back', isCompact);
+  closeListBtn.classList.toggle('hidden', isCompact && !hasActiveList);
+  closeListBtn.disabled = !hasActiveList;
+}
+
+if (typeof compactLayoutQuery.addEventListener === 'function') {
+  compactLayoutQuery.addEventListener('change', updateResponsiveListLayout);
+} else if (typeof compactLayoutQuery.addListener === 'function') {
+  compactLayoutQuery.addListener(updateResponsiveListLayout);
+}
+
 function setConnectedState(isConnected) {
   connectionStatusEl.classList.toggle('status-dot--connected', isConnected);
   connectionStatusEl.classList.toggle('status-dot--disconnected', !isConnected);
@@ -76,6 +106,13 @@ function showMessage(text, isError = false) {
     messagesEl.classList.remove('messages--error');
   }
   messagesEl.classList.toggle('hidden', !hasText);
+  if (rootEl) {
+    if (hasText) {
+      rootEl.setAttribute('data-message-visible', 'true');
+    } else {
+      rootEl.removeAttribute('data-message-visible');
+    }
+  }
 }
 
 function createListItemElement(itemId) {
@@ -528,6 +565,7 @@ function closeList() {
 }
 
 function renderActiveList() {
+  updateResponsiveListLayout();
   addItemButton.classList.toggle('hidden', !activeListId);
   addItemButton.disabled = !activeListId;
 
@@ -1215,6 +1253,8 @@ bulletinForm.addEventListener('submit', (event) => {
     showMessage(error.message, true);
   }
 });
+
+updateResponsiveListLayout();
 
 const savedCredentials = loadCredentials();
 if (savedCredentials) {
