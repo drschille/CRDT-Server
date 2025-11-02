@@ -17,6 +17,7 @@ const connectionStatusEl = document.querySelector('#connection-status');
 const connectionLabelEl = document.querySelector('#connection-label');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
+const statusBar = document.querySelector('#app-status');
 
 const listsContainer = document.querySelector('#lists');
 const listsEmptyState = document.querySelector('#lists-empty');
@@ -69,10 +70,12 @@ function setConnectedState(isConnected) {
 
 function showMessage(text, isError = false) {
   messagesEl.textContent = text;
-  messagesEl.classList.toggle('messages--error', isError);
-  if (!text) {
+  const hasText = Boolean(text);
+  messagesEl.classList.toggle('messages--error', hasText && isError);
+  if (!hasText) {
     messagesEl.classList.remove('messages--error');
   }
+  messagesEl.classList.toggle('hidden', !hasText);
 }
 
 function createListItemElement(itemId) {
@@ -238,11 +241,13 @@ function updateListItemElement(li, item, listReadOnly, listId) {
 function showAuthScreen() {
   authScreen.classList.remove('hidden');
   appShell.classList.add('hidden');
+  statusBar?.classList.add('hidden');
 }
 
 function showAppShell() {
   authScreen.classList.add('hidden');
   appShell.classList.remove('hidden');
+  statusBar?.classList.remove('hidden');
   setActiveView(state.activeView);
 }
 

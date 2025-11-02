@@ -9,6 +9,13 @@
   </head>
   <body>
     <main class="root">
+      <div class="status app-status hidden" id="app-status">
+        <span id="connection-status" class="status-dot status-dot--disconnected"></span>
+        <span id="connection-label">Disconnected</span>
+        <span id="current-user" class="current-user"></span>
+      </div>
+      <div class="messages app-messages hidden" id="messages"></div>
+
       <div id="auth-screen" class="auth-card">
         <h1>Collaborative Lists</h1>
         <p class="auth-subtitle">Sync wish lists and bulletins across devices.</p>
@@ -27,22 +34,15 @@
 
       <div id="app-shell" class="app-shell hidden">
         <aside class="nav-rail">
-          <button class="nav-btn active" data-view="lists">Lists</button>
-          <button class="nav-btn" data-view="bulletins">Bulletins</button>
-          <div class="nav-spacer"></div>
+          <div class="nav-rail__content">
+            <button class="nav-btn active" data-view="lists">Lists</button>
+            <button class="nav-btn" data-view="bulletins">Bulletins</button>
+          </div>
+
           <button class="nav-btn nav-btn--logout" id="logout-btn">Logout</button>
         </aside>
 
         <div class="app-main">
-          <header class="app-header">
-            <div class="status">
-              <span id="connection-status" class="status-dot status-dot--disconnected"></span>
-              <span id="connection-label">Disconnected</span>
-              <span id="current-user" class="current-user"></span>
-            </div>
-            <div class="messages" id="messages"></div>
-          </header>
-
           <section id="lists-view" class="view">
             <div class="lists-layout">
               <div class="lists-panel">
