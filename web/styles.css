@@ -94,15 +94,15 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
-  padding: clamp(0.5rem, 3vw, 1.25rem);
-  gap: clamp(0.25rem, 1.5vw, 0.75rem);
+  justify-content: center;
+  padding: clamp(0.5rem, 2vw, 1rem);
+  gap: clamp(0.05rem, 1vw, 0.5rem);
   box-sizing: border-box;
 }
 
 @supports (height: 100dvh) {
   .root {
-    min-height: 100dvh;
+    min-height: 98dvh;
   }
 }
 
@@ -197,11 +197,11 @@ button:not(:disabled):hover {
 .app-status {
   width: min(1180px, 100%);
   margin: 0 auto;
-  padding: 0 clamp(0.5rem, 2vw, 0.75rem);
+  padding: 0 clamp(0.5rem, 2vw, 1rem);
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  font-size: 0.82rem;
+  gap: 0.5rem;
+  font-size: 0.85rem;
   color: var(--color-muted);
 }
 
@@ -213,12 +213,12 @@ button:not(:disabled):hover {
 .app-messages {
   width: min(1180px, 100%);
   margin: 0 auto;
-  padding: 0 clamp(0.5rem, 2vw, 0.75rem);
+  padding: 0 clamp(0.5rem, 2vw, 1rem);
 }
 
 .app-shell {
   width: min(1180px, 100%);
-  height: clamp(520px, calc(100vh - 4rem), 780px);
+  height: clamp(560px, 90vh, 860px);
   background: var(--color-card);
   border-radius: 24px;
   overflow: hidden;
@@ -229,7 +229,7 @@ button:not(:disabled):hover {
 
 @supports (height: 100dvh) {
   .app-shell {
-    height: clamp(520px, calc(100dvh - 4rem), 780px);
+    height: clamp(560px, 90dvh, 860px);
   }
 }
 
@@ -324,6 +324,7 @@ button:not(:disabled):hover {
   color: var(--color-muted);
   line-height: 1.3;
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   max-height: 2.6em;
@@ -664,7 +665,7 @@ button:not(:disabled):hover {
   .app-status,
   .app-messages {
     width: 100%;
-    padding: 0 clamp(0.75rem, 4vw, 1.25rem);
+    padding: 0 clamp(1rem, 4vw, 1.5rem);
   }
 
   .app-messages {
