@@ -17,6 +17,7 @@ const connectionStatusEl = document.querySelector('#connection-status');
 const connectionLabelEl = document.querySelector('#connection-label');
 const currentUserEl = document.querySelector('#current-user');
 const messagesEl = document.querySelector('#messages');
+const statusBar = document.querySelector('#app-status');
 
 const listsContainer = document.querySelector('#lists');
 const listsEmptyState = document.querySelector('#lists-empty');
@@ -69,10 +70,12 @@ function setConnectedState(isConnected) {
 
 function showMessage(text, isError = false) {
   messagesEl.textContent = text;
-  messagesEl.classList.toggle('messages--error', isError);
-  if (!text) {
+  const hasText = Boolean(text);
+  messagesEl.classList.toggle('messages--error', hasText && isError);
+  if (!hasText) {
     messagesEl.classList.remove('messages--error');
   }
+  messagesEl.classList.toggle('hidden', !hasText);
 }
 
 function createListItemElement(itemId) {
@@ -160,8 +163,11 @@ function createListItemElement(itemId) {
   return li;
 }
 
-function updateListItemElement(li, item, listReadOnly) {
+function updateListItemElement(li, item, listReadOnly, listId) {
   li.dataset.itemId = item.id;
+  li.dataset.listId = listId ?? '';
+
+  const previousSnapshot = getRenderedItemSnapshot(listId, item.id);
 
   const checkbox = li.querySelector('.item-checkbox');
   if (checkbox instanceof HTMLInputElement) {
@@ -175,21 +181,36 @@ function updateListItemElement(li, item, listReadOnly) {
     labelInput.dataset.itemId = item.id;
     labelInput.disabled = listReadOnly;
     labelInput.classList.toggle('item-field--checked', Boolean(item.checked));
-    setInputValuePreserveCaret(labelInput, item.label);
+    const labelFocused = document.activeElement === labelInput;
+    const shouldUpdateLabel =
+      !labelFocused || !previousSnapshot || labelInput.value === previousSnapshot.label;
+    if (shouldUpdateLabel) {
+      setInputValuePreserveCaret(labelInput, item.label);
+    }
   }
 
   const quantityInput = li.querySelector('input[data-field="quantity"]');
   if (quantityInput instanceof HTMLInputElement) {
     quantityInput.dataset.itemId = item.id;
     quantityInput.disabled = listReadOnly;
-    setInputValuePreserveCaret(quantityInput, item.quantity ?? '');
+    const quantityFocused = document.activeElement === quantityInput;
+    const previousQuantity = previousSnapshot?.quantity ?? '';
+    const nextQuantity = item.quantity ?? '';
+    if (!quantityFocused || quantityInput.value === previousQuantity) {
+      setInputValuePreserveCaret(quantityInput, nextQuantity);
+    }
   }
 
   const vendorInput = li.querySelector('input[data-field="vendor"]');
   if (vendorInput instanceof HTMLInputElement) {
     vendorInput.dataset.itemId = item.id;
     vendorInput.disabled = listReadOnly;
-    setInputValuePreserveCaret(vendorInput, item.vendor ?? '');
+    const vendorFocused = document.activeElement === vendorInput;
+    const previousVendor = previousSnapshot?.vendor ?? '';
+    const nextVendor = item.vendor ?? '';
+    if (!vendorFocused || vendorInput.value === previousVendor) {
+      setInputValuePreserveCaret(vendorInput, nextVendor);
+    }
   }
 
   const meta = li.querySelector('.item-meta');
@@ -213,16 +234,20 @@ function updateListItemElement(li, item, listReadOnly) {
     removeBtn.dataset.itemId = item.id;
     removeBtn.disabled = listReadOnly;
   }
+
+  setRenderedItemSnapshot(listId, item);
 }
 
 function showAuthScreen() {
   authScreen.classList.remove('hidden');
   appShell.classList.add('hidden');
+  statusBar?.classList.add('hidden');
 }
 
 function showAppShell() {
   authScreen.classList.add('hidden');
   appShell.classList.remove('hidden');
+  statusBar?.classList.remove('hidden');
   setActiveView(state.activeView);
 }
 
@@ -556,8 +581,6 @@ function renderActiveList() {
     existingItems.set(li.dataset.itemId ?? '', li);
   }
 
-  const seenIds = new Set();
-
   if (listState.items.length === 0) {
     listEmptyEl.textContent = 'No items yet. Press + to add one.';
     listEmptyEl.classList.remove('hidden');
@@ -565,29 +588,32 @@ function renderActiveList() {
     listEmptyEl.classList.add('hidden');
   }
 
+  let index = 0;
+  const toRemove = new Set(existingItems.keys());
+
   for (const item of listState.items) {
-    seenIds.add(item.id);
     let li = existingItems.get(item.id);
-    const isNew = !li;
     if (!li) {
       li = createListItemElement(item.id);
     }
-    updateListItemElement(li, item, listReadOnly);
-    itemsContainer.appendChild(li);
-    setRenderedItemSnapshot(currentListId, item);
-    if (isNew) {
-      li.dataset.justAdded = 'true';
-    } else {
-      delete li.dataset.justAdded;
+    updateListItemElement(li, item, listReadOnly, currentListId);
+    const referenceNode = itemsContainer.children.item(index);
+    if (referenceNode !== li) {
+      itemsContainer.insertBefore(li, referenceNode ?? null);
     }
+    index += 1;
+    toRemove.delete(item.id);
   }
 
-  for (const [itemId, li] of existingItems) {
-    if (!seenIds.has(itemId)) {
-      li.remove();
-      if (currentListId) {
-        renderedItemSnapshots.delete(makeItemKey(currentListId, itemId));
-      }
+  for (const itemId of toRemove) {
+    const li = existingItems.get(itemId);
+    if (!li) {
+      continue;
+    }
+    const liListId = li.dataset.listId;
+    li.remove();
+    if (liListId) {
+      renderedItemSnapshots.delete(makeItemKey(liListId, itemId));
     }
   }
 
