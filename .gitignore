@@ -1,4 +1,5 @@
 node_modules
+web/vendor/automerge/
 pnpm-lock.yaml
 package-lock.json
 yarn.lock

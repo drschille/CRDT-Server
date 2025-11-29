@@ -9,7 +9,9 @@
     "dev": "tsx watch src/index.ts",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write .",
-    "test": "vitest"
+    "test": "vitest",
+    "copy:automerge": "node scripts/copy-automerge.mjs",
+    "postinstall": "pnpm run copy:automerge"
   },
   "keywords": [],
   "license": "MIT",

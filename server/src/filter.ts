@@ -33,8 +33,9 @@ export function filterListDoc(
   if (!isListVisibleTo(entry, userId)) {
     return null;
   }
+  const listId = doc.listId ?? entry.id;
   return {
-    listId: doc.listId,
+    listId,
     items: doc.items.map(toFilteredItem)
   };
 }

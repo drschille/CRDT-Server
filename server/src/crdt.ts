@@ -68,6 +68,12 @@ export async function loadListDoc(listId: ListId): Promise<Automerge.Doc<Shoppin
     doc = Automerge.from<ShoppingListDoc>({ listId, items: [] });
   }
 
+  if (!doc.listId) {
+    doc = Automerge.change(doc, 'set_list_id', (draft) => {
+      draft.listId = listId;
+    });
+  }
+
   listDocCache.set(listId, doc);
   return doc;
 }

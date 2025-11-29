@@ -1,3 +1,5 @@
+import * as AutomergeLib from './vendor/automerge/slim.js';
+
 const STORAGE_KEY = 'collab-lists-login';
 
 const authScreen = document.querySelector('#auth-screen');
@@ -43,8 +45,6 @@ const bulletinListEl = document.querySelector('#bulletin-list');
 
 let socket = null;
 let currentUserId = null;
-
-const AutomergeLib = window.Automerge;
 const replicas = new Map();
 const registryEntries = new Map();
 const listStates = new Map();
@@ -358,6 +358,7 @@ function connectWithCredentials(creds) {
   }
 
   socket = new WebSocket(connectUrl);
+  socket.binaryType = 'arraybuffer';
 
   socket.addEventListener('open', () => {
     setConnectedState(true);
@@ -366,11 +367,12 @@ function connectWithCredentials(creds) {
     showMessage('Connected');
   });
 
-  socket.addEventListener('message', (event) => {
+  socket.addEventListener('message', async (event) => {
     try {
-      handleMessage(JSON.parse(event.data));
+      const payload = await parseSocketMessage(event.data);
+      handleMessage(payload);
     } catch (error) {
-      console.error('Failed to handle message', error);
+      console.error('Failed to handle message', error, event.data);
       showMessage('Received malformed message from server', true);
     }
   });
@@ -425,6 +427,11 @@ function buildConnectUrl(serverUrl, username) {
 }
 
 function handleMessage(message) {
+  if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+    console.error('Automerge not initialized; cannot handle message');
+    showMessage('Automerge failed to initialize', true);
+    return;
+  }
   switch (message.type) {
     case 'welcome':
       currentUserId = message.userId;
@@ -453,6 +460,10 @@ function handleMessage(message) {
 
 function handleSnapshot(docSelector, stateData) {
   const descriptor = parseServerDescriptor(docSelector);
+  if (!descriptor) {
+    console.warn('Ignoring snapshot with invalid descriptor', docSelector);
+    return;
+  }
   switch (descriptor.kind) {
     case 'registry': {
       registryEntries.clear();
@@ -468,13 +479,15 @@ function handleSnapshot(docSelector, stateData) {
       break;
     }
     case 'list': {
-      if (stateData && stateData.listId) {
-        listStates.set(stateData.listId, stateData);
-        if (!activeListId) {
-          activeListId = stateData.listId;
-        }
-        renderActiveList();
+      if (!stateData || typeof stateData.listId !== 'string' || !Array.isArray(stateData.items)) {
+        console.warn('Ignoring list snapshot with invalid shape', stateData);
+        break;
       }
+      listStates.set(stateData.listId, stateData);
+      if (!activeListId) {
+        activeListId = stateData.listId;
+      }
+      renderActiveList();
       break;
     }
     default:
@@ -487,6 +500,14 @@ function handleSync(docSelector, base64) {
     return;
   }
   const descriptor = parseServerDescriptor(docSelector);
+  if (!descriptor) {
+    console.warn('Ignoring sync with invalid descriptor', docSelector);
+    return;
+  }
+  if (base64.trim().length === 0) {
+    console.warn('Ignoring empty sync payload');
+    return;
+  }
   const replica = ensureReplica(descriptor);
   try {
     const [nextDoc, nextState] = AutomergeLib.receiveSyncMessage(
@@ -961,6 +982,9 @@ function ensureReplica(descriptor) {
   const key = descriptorKey(descriptor);
   let replica = replicas.get(key);
   if (!replica) {
+    if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+      throw new Error('Automerge not ready');
+    }
     let doc;
     switch (descriptor.kind) {
       case 'registry':
@@ -1068,7 +1092,24 @@ function parseServerDescriptor(docSelector) {
   if (docSelector && typeof docSelector === 'object' && typeof docSelector.listId === 'string') {
     return { kind: 'list', listId: docSelector.listId };
   }
-  throw new Error('Unknown document selector');
+  return null;
+}
+
+async function parseSocketMessage(data) {
+  if (typeof data === 'string') {
+    return JSON.parse(data);
+  }
+  if (data instanceof Blob) {
+    return JSON.parse(await data.text());
+  }
+  if (data instanceof ArrayBuffer) {
+    return JSON.parse(arrayBufferToString(data));
+  }
+  return JSON.parse(String(data));
+}
+
+function arrayBufferToString(buffer) {
+  return new TextDecoder().decode(new Uint8Array(buffer));
 }
 
 function scheduleDebouncedItemAction(listId, key, build) {
