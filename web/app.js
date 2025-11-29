@@ -1,5 +1,25 @@
 import * as AutomergeLib from './vendor/automerge/slim.js';
 
+let automergeReady = null;
+function ensureAutomergeReady() {
+  if (!automergeReady) {
+    automergeReady = (async () => {
+      try {
+        return await AutomergeLib.initializeWasm(
+          new URL('./vendor/automerge/wasm_bindgen_output/web/automerge_wasm_bg.wasm', import.meta.url)
+        );
+      } catch (error) {
+        console.warn('WASM fetch failed, falling back to base64', error);
+        const { automergeWasmBase64 } = await import(
+          './vendor/automerge/wasm_bindgen_output/web/automerge_wasm_bg_base64.js'
+        );
+        return AutomergeLib.initializeBase64Wasm(automergeWasmBase64);
+      }
+    })();
+  }
+  return automergeReady;
+}
+
 const STORAGE_KEY = 'collab-lists-login';
 
 const authScreen = document.querySelector('#auth-screen');
@@ -338,7 +358,14 @@ function updateCurrentUser() {
   currentUserEl.textContent = currentUserId ? `Signed in as ${currentUserId}` : '';
 }
 
-function connectWithCredentials(creds) {
+async function connectWithCredentials(creds) {
+  try {
+    await ensureAutomergeReady();
+  } catch (error) {
+    console.error('Failed to initialize Automerge', error);
+    showMessage('Automerge failed to initialize', true);
+    return;
+  }
   state.credentials = creds;
   loginServerInput.value = creds.serverUrl;
   loginUsernameInput.value = creds.username ?? '';
@@ -1221,7 +1248,7 @@ loginForm.addEventListener('submit', (event) => {
     return;
   }
   const creds = { serverUrl, username: username || null };
-  connectWithCredentials(creds);
+  void connectWithCredentials(creds);
 });
 
 logoutBtn.addEventListener('click', () => {
@@ -1302,7 +1329,7 @@ if (savedCredentials) {
   state.activeView = 'lists';
   loginServerInput.value = savedCredentials.serverUrl;
   loginUsernameInput.value = savedCredentials.username ?? '';
-  connectWithCredentials(savedCredentials);
+  void connectWithCredentials(savedCredentials);
 } else {
   showAuthScreen();
   setActiveView('lists');

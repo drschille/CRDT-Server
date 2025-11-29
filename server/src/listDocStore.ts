@@ -42,6 +42,25 @@ export function markListDocDirty(listId: ListId, doc: Automerge.Doc<ShoppingList
   dirtyListIds.add(listId);
 }
 
+export async function saveListDocNow(
+  db: mysql.Pool,
+  listId: ListId,
+  doc: Automerge.Doc<ShoppingListDoc>
+): Promise<void> {
+  listDocCache.set(listId, doc);
+  dirtyListIds.delete(listId);
+  const bytes = Automerge.save(doc);
+  const now = new Date();
+  await db.query(
+    `
+    INSERT INTO list_docs (list_id, doc, updated_at)
+    VALUES (?, ?, ?)
+    ON DUPLICATE KEY UPDATE doc = VALUES(doc), updated_at = VALUES(updated_at)
+    `,
+    [listId, Buffer.from(bytes), now]
+  );
+}
+
 export async function flushDirtyListDocs(db: mysql.Pool): Promise<void> {
   if (dirtyListIds.size === 0) return;
   const ids = Array.from(dirtyListIds);

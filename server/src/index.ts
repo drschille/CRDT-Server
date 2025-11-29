@@ -15,7 +15,7 @@ const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const WEB_ROOT = path.resolve(__dirname, '../../web');
-const FLUSH_INTERVAL_MS = 5000;
+const FLUSH_INTERVAL_MS = 1000;
 
 async function main() {
   const app = express();

@@ -26,7 +26,13 @@ import {
   fetchRegistryEntry,
   isListVisibleTo
 } from './registryStore.js';
-import { getCachedListDoc, loadListDoc, markListDocDirty, forgetListDoc } from './listDocStore.js';
+import {
+  getCachedListDoc,
+  loadListDoc,
+  markListDocDirty,
+  saveListDocNow,
+  forgetListDoc
+} from './listDocStore.js';
 import { filterBulletins } from './filter.js';
 import { resolveUserId } from './auth.js';
 import { info, warn } from './logger.js';
@@ -189,7 +195,7 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
                 return;
               }
               handleBulletinAction(connection, context, message.action);
-              await saveBulletinDoc(context.bulletinsDoc);
+              await saveBulletinDoc(context.db, context.bulletinsDoc);
               broadcastDoc(connections, context, { kind: 'bulletins' });
               break;
             case 'sync':
@@ -254,7 +260,7 @@ async function handleRegistryAction(
         action.collaborators ?? []
       );
       const listDoc = Automerge.from<ShoppingListDoc>({ listId, items: [] });
-      markListDocDirty(listId, listDoc);
+      await saveListDocNow(context.db, listId, listDoc);
       break;
     }
     case 'rename_list':
@@ -328,7 +334,7 @@ async function handleListAction(
       throw new Error(`Unsupported list action ${(action as { type: string }).type}`);
   }
 
-  markListDocDirty(listId, nextDoc);
+  await saveListDocNow(context.db, listId, nextDoc);
 }
 
 function handleBulletinAction(
@@ -444,7 +450,7 @@ async function sendSnapshot(
         return;
       }
       const doc = await loadOrGetListDoc(context, descriptor.listId);
-      const state = toFilteredListDoc(doc, connection.userId);
+      const state = toFilteredListDoc(doc);
       sendJson(connection.socket, { type: 'snapshot', doc: { listId: descriptor.listId }, state });
       break;
     }
@@ -489,7 +495,8 @@ export async function handleSyncMessage(
   base64: string
 ): Promise<void> {
   if (descriptor.kind === 'registry') {
-    throw new Error('Registry sync is not supported');
+    // Registry is DB-backed and not synced as a CRDT anymore; ignore client sync frames.
+    return;
   }
   const subscription = connection.subscriptions.get(descriptorKey(descriptor));
   if (!subscription) {
@@ -545,12 +552,13 @@ export async function handleSyncMessage(
   switch (descriptor.kind) {
     case 'bulletins':
       context.bulletinsDoc = nextDoc as Automerge.Doc<BulletinDoc>;
-      context.bulletinsDirty = true;
+      await saveBulletinDoc(context.db, context.bulletinsDoc);
+      context.bulletinsDirty = false;
       updatedDescriptor = { kind: 'bulletins' };
       break;
     case 'list': {
       const nextListDoc = nextDoc as Automerge.Doc<ShoppingListDoc>;
-      markListDocDirty(descriptor.listId, nextListDoc);
+      await saveListDocNow(context.db, descriptor.listId, nextListDoc);
       updatedDescriptor = { kind: 'list', listId: descriptor.listId };
       break;
     }
