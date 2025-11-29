@@ -1,3 +1,5 @@
+import * as AutomergeLib from './vendor/automerge/slim.js';
+
 const STORAGE_KEY = 'collab-lists-login';
 
 const authScreen = document.querySelector('#auth-screen');
@@ -43,8 +45,6 @@ const bulletinListEl = document.querySelector('#bulletin-list');
 
 let socket = null;
 let currentUserId = null;
-
-const AutomergeLib = window.Automerge;
 const replicas = new Map();
 const registryEntries = new Map();
 const listStates = new Map();
