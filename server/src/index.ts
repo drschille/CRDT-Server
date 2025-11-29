@@ -3,10 +3,11 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createWSServer } from './ws.js';
-import { loadBulletinDoc, loadRegistryDoc } from './crdt.js';
+import { loadBulletinDoc } from './crdt.js';
 import { info, error } from './logger.js';
 import * as Automerge from '@automerge/automerge';
-import type { ShoppingListDoc } from './types.js';
+import { ensureTables, getPool } from './db.js';
+import { fetchAccessibleRegistry } from './registryStore.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
 const __filename = fileURLToPath(import.meta.url);
@@ -17,14 +18,13 @@ async function main() {
   const app = express();
   const server = http.createServer(app);
 
-  const registryDoc = await loadRegistryDoc();
+  const db = getPool();
+  await ensureTables(db);
   const bulletinsDoc = await loadBulletinDoc();
-  const listDocs = new Map<string, Automerge.Doc<ShoppingListDoc>>();
 
   const context = {
-    registryDoc,
-    bulletinsDoc,
-    listDocs
+    db,
+    bulletinsDoc
   };
 
   app.get('/healthz', (_req, res) => {
@@ -42,17 +42,17 @@ async function main() {
   );
 
   app.get('/debug/state', (_req, res) => {
-    if (process.env.NODE_ENV === 'production') {
-      res.status(404).json({ error: 'Not found' });
-      return;
-    }
-    res.json({
-      registry: Automerge.toJS(context.registryDoc),
-      bulletins: Automerge.toJS(context.bulletinsDoc),
-      lists: Object.fromEntries(
-        Array.from(context.listDocs.entries()).map(([id, doc]) => [id, Automerge.toJS(doc)])
-      )
-    });
+    void (async () => {
+      if (process.env.NODE_ENV === 'production') {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      const registry = await fetchAccessibleRegistry(db, 'debug-user');
+      res.json({
+        registry,
+        bulletins: Automerge.toJS(context.bulletinsDoc)
+      });
+    })();
   });
 
   createWSServer(server, context);

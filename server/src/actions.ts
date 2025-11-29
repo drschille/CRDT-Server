@@ -12,6 +12,13 @@ import {
   Visibility
 } from './types.js';
 
+export interface ListAccess {
+  ownerId: UserId;
+  visibility: Visibility;
+  collaborators: Record<UserId, true>;
+  archived?: boolean;
+}
+
 export const MAX_NAME_LENGTH = 200;
 export const MAX_NOTES_LENGTH = 2000;
 export const MAX_STRING_FIELD_LENGTH = 200;
@@ -128,7 +135,7 @@ export function deleteListEntry(
 
 export function addItem(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   rawLabel: string,
   quantity?: string,
@@ -163,7 +170,7 @@ export function addItem(
 
 export function updateItemLabel(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string,
   rawLabel: string
@@ -179,7 +186,7 @@ export function updateItemLabel(
 
 export function setItemQuantity(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string,
   quantity?: string
@@ -198,7 +205,7 @@ export function setItemQuantity(
 
 export function setItemVendor(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string,
   vendor?: string
@@ -217,7 +224,7 @@ export function setItemVendor(
 
 export function setItemNotes(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string,
   notes?: string
@@ -236,7 +243,7 @@ export function setItemNotes(
 
 export function toggleItemChecked(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string,
   checked: boolean
@@ -250,7 +257,7 @@ export function toggleItemChecked(
 
 export function removeItem(
   doc: Automerge.Doc<ShoppingListDoc>,
-  entry: ListRegistryEntry,
+  entry: ListAccess,
   userId: UserId,
   itemId: string
 ): Automerge.Doc<ShoppingListDoc> {
@@ -337,7 +344,7 @@ function ensureOwner(entry: ListRegistryEntry, userId: UserId): void {
   }
 }
 
-function ensureCanEditMetadata(entry: ListRegistryEntry, userId: UserId): void {
+function ensureCanEditMetadata(entry: ListAccess, userId: UserId): void {
   if (entry.ownerId === userId) {
     return;
   }
@@ -347,7 +354,7 @@ function ensureCanEditMetadata(entry: ListRegistryEntry, userId: UserId): void {
   throw new Error('Forbidden');
 }
 
-function ensureListEditable(entry: ListRegistryEntry, userId: UserId): void {
+function ensureListEditable(entry: ListAccess, userId: UserId): void {
   if (entry.archived) {
     throw new Error('List is archived');
   }
