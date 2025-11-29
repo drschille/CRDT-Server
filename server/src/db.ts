@@ -89,4 +89,12 @@ export async function ensureTables(db: mysql.Pool): Promise<void> {
         ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS bulletin_docs (
+      id TINYINT PRIMARY KEY,
+      doc LONGBLOB NOT NULL,
+      updated_at DATETIME NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
 }

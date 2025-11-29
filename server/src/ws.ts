@@ -14,7 +14,7 @@ import {
   updateItemLabel,
   editBulletin
 } from './actions.js';
-import { saveBulletinDoc } from './crdt.js';
+import { saveBulletinDoc } from './bulletinStore.js';
 import {
   fetchAccessibleRegistry,
   createListEntry,
@@ -26,7 +26,7 @@ import {
   fetchRegistryEntry,
   isListVisibleTo
 } from './registryStore.js';
-import { getCachedListDoc, loadListDoc, saveListDoc, forgetListDoc } from './listDocStore.js';
+import { getCachedListDoc, loadListDoc, markListDocDirty, forgetListDoc } from './listDocStore.js';
 import { filterBulletins } from './filter.js';
 import { resolveUserId } from './auth.js';
 import { info, warn } from './logger.js';
@@ -87,6 +87,7 @@ type BulletinAction =
 interface ServerContext {
   db: mysql.Pool;
   bulletinsDoc: Automerge.Doc<BulletinDoc>;
+  bulletinsDirty: boolean;
 }
 
 interface Subscription {
@@ -253,7 +254,7 @@ async function handleRegistryAction(
         action.collaborators ?? []
       );
       const listDoc = Automerge.from<ShoppingListDoc>({ listId, items: [] });
-      await saveListDoc(context.db, listId, listDoc);
+      markListDocDirty(listId, listDoc);
       break;
     }
     case 'rename_list':
@@ -327,7 +328,7 @@ async function handleListAction(
       throw new Error(`Unsupported list action ${(action as { type: string }).type}`);
   }
 
-  await saveListDoc(context.db, listId, nextDoc);
+  markListDocDirty(listId, nextDoc);
 }
 
 function handleBulletinAction(
@@ -343,12 +344,15 @@ function handleBulletinAction(
         action.text,
         action.visibility ?? 'public'
       );
+      context.bulletinsDirty = true;
       break;
     case 'edit_bulletin':
       context.bulletinsDoc = editBulletin(context.bulletinsDoc, connection.userId, action.bulletinId, action.text);
+      context.bulletinsDirty = true;
       break;
     case 'delete_bulletin':
       context.bulletinsDoc = deleteBulletin(context.bulletinsDoc, connection.userId, action.bulletinId);
+      context.bulletinsDirty = true;
       break;
     default:
       throw new Error(`Unsupported bulletin action ${(action as { type: string }).type}`);
@@ -541,12 +545,12 @@ export async function handleSyncMessage(
   switch (descriptor.kind) {
     case 'bulletins':
       context.bulletinsDoc = nextDoc as Automerge.Doc<BulletinDoc>;
-      await saveBulletinDoc(context.bulletinsDoc);
+      context.bulletinsDirty = true;
       updatedDescriptor = { kind: 'bulletins' };
       break;
     case 'list': {
       const nextListDoc = nextDoc as Automerge.Doc<ShoppingListDoc>;
-      await saveListDoc(context.db, descriptor.listId, nextListDoc);
+      markListDocDirty(descriptor.listId, nextListDoc);
       updatedDescriptor = { kind: 'list', listId: descriptor.listId };
       break;
     }

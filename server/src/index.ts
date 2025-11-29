@@ -3,16 +3,19 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createWSServer } from './ws.js';
-import { loadBulletinDoc } from './crdt.js';
 import { info, error } from './logger.js';
 import * as Automerge from '@automerge/automerge';
 import { ensureTables, getPool } from './db.js';
 import { fetchAccessibleRegistry } from './registryStore.js';
+import { loadBulletinDoc } from './bulletinStore.js';
+import { flushDirtyListDocs } from './listDocStore.js';
+import { saveBulletinDoc } from './bulletinStore.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const WEB_ROOT = path.resolve(__dirname, '../../web');
+const FLUSH_INTERVAL_MS = 5000;
 
 async function main() {
   const app = express();
@@ -20,11 +23,12 @@ async function main() {
 
   const db = getPool();
   await ensureTables(db);
-  const bulletinsDoc = await loadBulletinDoc();
+  const bulletinsDoc = await loadBulletinDoc(db);
 
   const context = {
     db,
-    bulletinsDoc
+    bulletinsDoc,
+    bulletinsDirty: false
   };
 
   app.get('/healthz', (_req, res) => {
@@ -57,8 +61,36 @@ async function main() {
 
   createWSServer(server, context);
 
+  const flushTimer = setInterval(async () => {
+    try {
+      await flushDirtyListDocs(db);
+      if (context.bulletinsDirty) {
+        await saveBulletinDoc(db, context.bulletinsDoc);
+        context.bulletinsDirty = false;
+      }
+    } catch (err) {
+      error('flush failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }, FLUSH_INTERVAL_MS);
+
   server.listen(PORT, () => {
     info('server listening', { port: PORT });
+  });
+
+  const shutdown = async () => {
+    clearInterval(flushTimer);
+    await flushDirtyListDocs(db);
+    if (context.bulletinsDirty) {
+      await saveBulletinDoc(db, context.bulletinsDoc);
+      context.bulletinsDirty = false;
+    }
+  };
+
+  process.on('SIGINT', () => {
+    shutdown().finally(() => process.exit(0));
+  });
+  process.on('SIGTERM', () => {
+    shutdown().finally(() => process.exit(0));
   });
 }
 
