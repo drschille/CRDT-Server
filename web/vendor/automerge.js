@@ -2098,14 +2098,31 @@ ${val.stack}`;
   function loadAutomergeWasmBlob() {
     const scriptUrl = typeof document !== "undefined" && document.currentScript ? document.currentScript.src : "automerge.js";
     const wasmUrl = new URL("automerge_wasm_bg.wasm", scriptUrl).toString();
-    const request = new XMLHttpRequest();
-    request.open("GET", wasmUrl, false);
-    request.responseType = "arraybuffer";
-    request.send(null);
-    if (request.status !== 200 && request.status !== 0) {
-      throw new Error(`Failed to load automerge_wasm_bg.wasm from ${wasmUrl}: ${request.status} ${request.statusText}`);
+    try {
+      const request = new XMLHttpRequest();
+      request.open("GET", wasmUrl, false);
+      request.responseType = "arraybuffer";
+      request.send(null);
+      if (request.status === 200 || request.status === 0) {
+        return new Uint8Array(request.response);
+      }
+      console.warn(`Failed to load automerge_wasm_bg.wasm (${request.status}); falling back to base64`, request.statusText);
+    } catch (error) {
+      console.warn("Failed to load automerge_wasm_bg.wasm; falling back to base64", error);
     }
-    return new Uint8Array(request.response);
+    const base64Url = new URL("../automerge_wasm.base64", scriptUrl).toString();
+    const fallback = new XMLHttpRequest();
+    fallback.open("GET", base64Url, false);
+    fallback.overrideMimeType("text/plain");
+    fallback.send(null);
+    if (fallback.status !== 200 && fallback.status !== 0) {
+      throw new Error(`Failed to load automerge wasm from ${wasmUrl} and base64 fallback ${base64Url}`);
+    }
+    const text = (fallback.responseText || "").trim();
+    if (!text) {
+      throw new Error("automerge wasm base64 fallback is empty");
+    }
+    return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
   }
   function wasmInitialized() {
     if (_initialized)

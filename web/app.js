@@ -427,6 +427,11 @@ function buildConnectUrl(serverUrl, username) {
 }
 
 function handleMessage(message) {
+  if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+    console.error('Automerge not initialized; cannot handle message');
+    showMessage('Automerge failed to initialize', true);
+    return;
+  }
   switch (message.type) {
     case 'welcome':
       currentUserId = message.userId;
@@ -455,6 +460,10 @@ function handleMessage(message) {
 
 function handleSnapshot(docSelector, stateData) {
   const descriptor = parseServerDescriptor(docSelector);
+  if (!descriptor) {
+    console.warn('Ignoring snapshot with invalid descriptor', docSelector);
+    return;
+  }
   switch (descriptor.kind) {
     case 'registry': {
       registryEntries.clear();
@@ -470,13 +479,15 @@ function handleSnapshot(docSelector, stateData) {
       break;
     }
     case 'list': {
-      if (stateData && stateData.listId) {
-        listStates.set(stateData.listId, stateData);
-        if (!activeListId) {
-          activeListId = stateData.listId;
-        }
-        renderActiveList();
+      if (!stateData || typeof stateData.listId !== 'string' || !Array.isArray(stateData.items)) {
+        console.warn('Ignoring list snapshot with invalid shape', stateData);
+        break;
       }
+      listStates.set(stateData.listId, stateData);
+      if (!activeListId) {
+        activeListId = stateData.listId;
+      }
+      renderActiveList();
       break;
     }
     default:
@@ -489,6 +500,14 @@ function handleSync(docSelector, base64) {
     return;
   }
   const descriptor = parseServerDescriptor(docSelector);
+  if (!descriptor) {
+    console.warn('Ignoring sync with invalid descriptor', docSelector);
+    return;
+  }
+  if (base64.trim().length === 0) {
+    console.warn('Ignoring empty sync payload');
+    return;
+  }
   const replica = ensureReplica(descriptor);
   try {
     const [nextDoc, nextState] = AutomergeLib.receiveSyncMessage(
@@ -963,6 +982,9 @@ function ensureReplica(descriptor) {
   const key = descriptorKey(descriptor);
   let replica = replicas.get(key);
   if (!replica) {
+    if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+      throw new Error('Automerge not ready');
+    }
     let doc;
     switch (descriptor.kind) {
       case 'registry':
@@ -1070,7 +1092,7 @@ function parseServerDescriptor(docSelector) {
   if (docSelector && typeof docSelector === 'object' && typeof docSelector.listId === 'string') {
     return { kind: 'list', listId: docSelector.listId };
   }
-  throw new Error('Unknown document selector');
+  return null;
 }
 
 async function parseSocketMessage(data) {
