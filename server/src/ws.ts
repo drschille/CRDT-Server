@@ -5,41 +5,45 @@ import * as Automerge from '@automerge/automerge';
 import {
   addBulletin,
   addItem,
-  archiveList,
-  createList,
   deleteBulletin,
-  deleteListEntry,
-  renameList,
   removeItem,
-  setCollaborators,
   setItemNotes,
   setItemQuantity,
   setItemVendor,
   toggleItemChecked,
-  updateListVisibility,
   updateItemLabel,
   editBulletin
 } from './actions.js';
+import { saveBulletinDoc } from './bulletinStore.js';
 import {
-  deleteListDoc,
-  forgetListDoc,
+  fetchAccessibleRegistry,
+  createListEntry,
+  renameList as renameListMeta,
+  updateListVisibility as updateListVisibilityMeta,
+  setCollaborators as setListCollaborators,
+  archiveList as archiveListMeta,
+  deleteList as deleteListMeta,
+  fetchRegistryEntry,
+  isListVisibleTo
+} from './registryStore.js';
+import {
+  getCachedListDoc,
   loadListDoc,
-  saveBulletinDoc,
-  saveListDoc,
-  saveRegistryDoc
-} from './crdt.js';
-import { filterBulletins, filterListDoc, filterRegistryDoc, isListVisibleTo } from './filter.js';
+  markListDocDirty,
+  saveListDocNow,
+  forgetListDoc
+} from './listDocStore.js';
+import { filterBulletins } from './filter.js';
 import { resolveUserId } from './auth.js';
 import { info, warn } from './logger.js';
 import {
   BulletinDoc,
   ListId,
-  ListRegistryDoc,
-  ListRegistryEntry,
   ShoppingListDoc,
   UserId,
   Visibility
 } from './types.js';
+import type mysql from 'mysql2/promise';
 
 const RATE_LIMIT_CAPACITY = 40;
 const RATE_LIMIT_REFILL_PER_SECOND = 20;
@@ -87,9 +91,9 @@ type BulletinAction =
   | { type: 'delete_bulletin'; bulletinId: string };
 
 interface ServerContext {
-  registryDoc: Automerge.Doc<ListRegistryDoc>;
+  db: mysql.Pool;
   bulletinsDoc: Automerge.Doc<BulletinDoc>;
-  listDocs: Map<ListId, Automerge.Doc<ShoppingListDoc>>;
+  bulletinsDirty: boolean;
 }
 
 interface Subscription {
@@ -177,7 +181,6 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
                 return;
               }
               await handleRegistryAction(connection, context, message.action);
-              await saveRegistryDoc(context.registryDoc);
               broadcastDoc(connections, context, { kind: 'registry' });
               break;
             case 'list_action':
@@ -192,7 +195,7 @@ export function createWSServer(server: HTTPServer, context: ServerContext): WebS
                 return;
               }
               handleBulletinAction(connection, context, message.action);
-              await saveBulletinDoc(context.bulletinsDoc);
+              await saveBulletinDoc(context.db, context.bulletinsDoc);
               broadcastDoc(connections, context, { kind: 'bulletins' });
               break;
             case 'sync':
@@ -249,48 +252,41 @@ async function handleRegistryAction(
 ): Promise<void> {
   switch (action.type) {
     case 'create_list': {
-      const { doc, listId } = createList(
-        context.registryDoc,
+      const listId = await createListEntry(
+        context.db,
         connection.userId,
         action.name,
         action.visibility ?? 'private',
         action.collaborators ?? []
       );
-      context.registryDoc = doc;
-      const listDoc = await loadListDoc(listId);
-      context.listDocs.set(listId, listDoc);
-      await saveListDoc(listId, listDoc);
+      const listDoc = Automerge.from<ShoppingListDoc>({ listId, items: [] });
+      await saveListDocNow(context.db, listId, listDoc);
       break;
     }
     case 'rename_list':
-      context.registryDoc = renameList(context.registryDoc, connection.userId, action.listId, action.name);
+      await renameListMeta(context.db, action.listId, connection.userId, action.name);
       break;
     case 'update_list_visibility':
-      context.registryDoc = updateListVisibility(
-        context.registryDoc,
-        connection.userId,
-        action.listId,
-        action.visibility
-      );
+      await updateListVisibilityMeta(context.db, action.listId, connection.userId, action.visibility);
       break;
     case 'set_collaborators':
-      context.registryDoc = setCollaborators(
-        context.registryDoc,
-        connection.userId,
-        action.listId,
-        action.collaborators
-      );
+      {
+        const entry = await fetchRegistryEntry(context.db, action.listId);
+        if (!entry || entry.ownerId !== connection.userId) {
+          throw new Error('Forbidden');
+        }
+        await setListCollaborators(context.db, action.listId, action.collaborators);
+      }
       break;
     case 'archive_list':
-      context.registryDoc = archiveList(context.registryDoc, connection.userId, action.listId, true);
+      await archiveListMeta(context.db, action.listId, connection.userId, true);
       break;
     case 'restore_list':
-      context.registryDoc = archiveList(context.registryDoc, connection.userId, action.listId, false);
+      await archiveListMeta(context.db, action.listId, connection.userId, false);
       break;
     case 'delete_list':
-      context.registryDoc = deleteListEntry(context.registryDoc, connection.userId, action.listId);
-      context.listDocs.delete(action.listId);
-      await deleteListDoc(action.listId);
+      await deleteListMeta(context.db, action.listId, connection.userId);
+      forgetListDoc(action.listId);
       break;
     default:
       throw new Error(`Unsupported registry action ${(action as { type: string }).type}`);
@@ -303,7 +299,7 @@ async function handleListAction(
   listId: ListId,
   action: ListAction
 ): Promise<void> {
-  const entry = context.registryDoc.lists.find((l) => l.id === listId);
+  const entry = await fetchRegistryEntry(context.db, listId);
   if (!entry || !isListVisibleTo(entry, connection.userId)) {
     throw new Error('List not accessible');
   }
@@ -338,8 +334,7 @@ async function handleListAction(
       throw new Error(`Unsupported list action ${(action as { type: string }).type}`);
   }
 
-  context.listDocs.set(listId, nextDoc);
-  await saveListDoc(listId, nextDoc);
+  await saveListDocNow(context.db, listId, nextDoc);
 }
 
 function handleBulletinAction(
@@ -355,12 +350,15 @@ function handleBulletinAction(
         action.text,
         action.visibility ?? 'public'
       );
+      context.bulletinsDirty = true;
       break;
     case 'edit_bulletin':
       context.bulletinsDoc = editBulletin(context.bulletinsDoc, connection.userId, action.bulletinId, action.text);
+      context.bulletinsDirty = true;
       break;
     case 'delete_bulletin':
       context.bulletinsDoc = deleteBulletin(context.bulletinsDoc, connection.userId, action.bulletinId);
+      context.bulletinsDirty = true;
       break;
     default:
       throw new Error(`Unsupported bulletin action ${(action as { type: string }).type}`);
@@ -373,7 +371,6 @@ async function initializeConnection(connection: Connection, context: ServerConte
     await subscribe(connection, context, { kind: 'bulletins' });
     await sendSnapshot(connection, context, { kind: 'registry' });
     await sendSnapshot(connection, context, { kind: 'bulletins' });
-    flushSync(connection, context, { kind: 'registry' });
     flushSync(connection, context, { kind: 'bulletins' });
   } catch (error) {
     warn('failed to initialize connection', {
@@ -433,7 +430,7 @@ async function sendSnapshot(
 ): Promise<void> {
   switch (descriptor.kind) {
     case 'registry': {
-      const state = filterRegistryDoc(context.registryDoc, connection.userId);
+      const state = await fetchAccessibleRegistry(context.db, connection.userId);
       sendJson(connection.socket, { type: 'snapshot', doc: 'registry', state });
       break;
     }
@@ -443,7 +440,7 @@ async function sendSnapshot(
       break;
     }
     case 'list': {
-      const entry = context.registryDoc.lists.find((l) => l.id === descriptor.listId);
+      const entry = await fetchRegistryEntry(context.db, descriptor.listId);
       if (!entry || !isListVisibleTo(entry, connection.userId)) {
         sendJson(connection.socket, {
           type: 'error',
@@ -452,37 +449,9 @@ async function sendSnapshot(
         });
         return;
       }
-      let doc = context.listDocs.get(descriptor.listId);
-      if (!doc) {
-        try {
-          doc = await loadOrGetListDoc(context, descriptor.listId);
-        } catch (error) {
-          sendJson(connection.socket, {
-            type: 'error',
-            code: 'NOT_FOUND',
-            message: 'List document unavailable'
-          });
-          return;
-        }
-      }
-      if (!doc) {
-        sendJson(connection.socket, {
-          type: 'error',
-          code: 'NOT_FOUND',
-          message: 'List document unavailable'
-        });
-        return;
-      }
-      const filtered = filterListDoc(doc, entry, connection.userId);
-      if (!filtered) {
-        sendJson(connection.socket, {
-          type: 'error',
-          code: 'FORBIDDEN',
-          message: 'No access to list'
-        });
-        return;
-      }
-      sendJson(connection.socket, { type: 'snapshot', doc: { listId: descriptor.listId }, state: filtered });
+      const doc = await loadOrGetListDoc(context, descriptor.listId);
+      const state = toFilteredListDoc(doc);
+      sendJson(connection.socket, { type: 'snapshot', doc: { listId: descriptor.listId }, state });
       break;
     }
     default:
@@ -491,6 +460,9 @@ async function sendSnapshot(
 }
 
 function flushSync(connection: Connection, context: ServerContext, descriptor: DocDescriptor): void {
+  if (descriptor.kind === 'registry') {
+    return;
+  }
   const subscription = connection.subscriptions.get(descriptorKey(descriptor));
   if (!subscription || connection.socket.readyState !== WebSocket.OPEN) {
     return;
@@ -522,6 +494,10 @@ export async function handleSyncMessage(
   descriptor: DocDescriptor,
   base64: string
 ): Promise<void> {
+  if (descriptor.kind === 'registry') {
+    // Registry is DB-backed and not synced as a CRDT anymore; ignore client sync frames.
+    return;
+  }
   const subscription = connection.subscriptions.get(descriptorKey(descriptor));
   if (!subscription) {
     throw new Error('Not subscribed to document');
@@ -574,20 +550,15 @@ export async function handleSyncMessage(
   let updatedDescriptor: DocDescriptor | undefined;
 
   switch (descriptor.kind) {
-    case 'registry':
-      context.registryDoc = nextDoc as Automerge.Doc<ListRegistryDoc>;
-      await saveRegistryDoc(context.registryDoc);
-      updatedDescriptor = { kind: 'registry' };
-      break;
     case 'bulletins':
       context.bulletinsDoc = nextDoc as Automerge.Doc<BulletinDoc>;
-      await saveBulletinDoc(context.bulletinsDoc);
+      await saveBulletinDoc(context.db, context.bulletinsDoc);
+      context.bulletinsDirty = false;
       updatedDescriptor = { kind: 'bulletins' };
       break;
     case 'list': {
       const nextListDoc = nextDoc as Automerge.Doc<ShoppingListDoc>;
-      context.listDocs.set(descriptor.listId, nextListDoc);
-      await saveListDoc(descriptor.listId, nextListDoc);
+      await saveListDocNow(context.db, descriptor.listId, nextListDoc);
       updatedDescriptor = { kind: 'list', listId: descriptor.listId };
       break;
     }
@@ -603,28 +574,19 @@ export async function handleSyncMessage(
 function resolveDocForDescriptor(
   context: ServerContext,
   descriptor: DocDescriptor
-): Automerge.Doc<ListRegistryDoc | BulletinDoc | ShoppingListDoc> | undefined {
+): Automerge.Doc<BulletinDoc | ShoppingListDoc> | undefined {
   switch (descriptor.kind) {
-    case 'registry':
-      return context.registryDoc;
     case 'bulletins':
       return context.bulletinsDoc;
     case 'list':
-      return context.listDocs.get(descriptor.listId);
+      return getCachedListDoc(descriptor.listId);
     default:
       return undefined;
   }
 }
 
 function loadOrGetListDoc(context: ServerContext, listId: ListId): Promise<Automerge.Doc<ShoppingListDoc>> {
-  const cached = context.listDocs.get(listId);
-  if (cached) {
-    return Promise.resolve(cached);
-  }
-  return loadListDoc(listId).then((doc) => {
-    context.listDocs.set(listId, doc);
-    return doc;
-  });
+  return loadListDoc(context.db, listId);
 }
 
 function consumeRateLimit(connection: Connection, cost: number): boolean {
@@ -659,6 +621,34 @@ function parseDocSelector(selector: DocSelector): DocDescriptor {
     return { kind: 'list', listId: selector.listId };
   }
   throw new Error('Invalid doc selector');
+}
+
+function toFilteredListDoc(doc: Automerge.Doc<ShoppingListDoc>): {
+  listId: ListId;
+  items: {
+    id: string;
+    label: string;
+    createdAt: string;
+    addedBy: string;
+    quantity?: string;
+    vendor?: string;
+    notes?: string;
+    checked?: boolean;
+  }[];
+} {
+  return {
+    listId: doc.listId,
+    items: doc.items.map((item) => ({
+      id: item.id,
+      label: item.label.toString(),
+      createdAt: item.createdAt,
+      addedBy: item.addedBy,
+      quantity: item.quantity,
+      vendor: item.vendor,
+      notes: item.notes?.toString(),
+      checked: item.checked
+    }))
+  };
 }
 
 function descriptorKey(descriptor: DocDescriptor): string {
