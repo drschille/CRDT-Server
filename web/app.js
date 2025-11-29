@@ -386,6 +386,7 @@ async function connectWithCredentials(creds) {
 
   socket = new WebSocket(connectUrl);
   socket.binaryType = 'arraybuffer';
+  socket.binaryType = 'arraybuffer';
 
   socket.addEventListener('open', () => {
     setConnectedState(true);
@@ -395,10 +396,14 @@ async function connectWithCredentials(creds) {
   });
 
   socket.addEventListener('message', async (event) => {
+  socket.addEventListener('message', async (event) => {
     try {
       const payload = await parseSocketMessage(event.data);
       handleMessage(payload);
+      const payload = await parseSocketMessage(event.data);
+      handleMessage(payload);
     } catch (error) {
+      console.error('Failed to handle message', error, event.data);
       console.error('Failed to handle message', error, event.data);
       showMessage('Received malformed message from server', true);
     }
@@ -459,6 +464,11 @@ function handleMessage(message) {
     showMessage('Automerge failed to initialize', true);
     return;
   }
+  if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+    console.error('Automerge not initialized; cannot handle message');
+    showMessage('Automerge failed to initialize', true);
+    return;
+  }
   switch (message.type) {
     case 'welcome':
       currentUserId = message.userId;
@@ -491,6 +501,10 @@ function handleSnapshot(docSelector, stateData) {
     console.warn('Ignoring snapshot with invalid descriptor', docSelector);
     return;
   }
+  if (!descriptor) {
+    console.warn('Ignoring snapshot with invalid descriptor', docSelector);
+    return;
+  }
   switch (descriptor.kind) {
     case 'registry': {
       registryEntries.clear();
@@ -515,6 +529,15 @@ function handleSnapshot(docSelector, stateData) {
         activeListId = stateData.listId;
       }
       renderActiveList();
+      if (!stateData || typeof stateData.listId !== 'string' || !Array.isArray(stateData.items)) {
+        console.warn('Ignoring list snapshot with invalid shape', stateData);
+        break;
+      }
+      listStates.set(stateData.listId, stateData);
+      if (!activeListId) {
+        activeListId = stateData.listId;
+      }
+      renderActiveList();
       break;
     }
     default:
@@ -527,6 +550,14 @@ function handleSync(docSelector, base64) {
     return;
   }
   const descriptor = parseServerDescriptor(docSelector);
+  if (!descriptor) {
+    console.warn('Ignoring sync with invalid descriptor', docSelector);
+    return;
+  }
+  if (base64.trim().length === 0) {
+    console.warn('Ignoring empty sync payload');
+    return;
+  }
   if (!descriptor) {
     console.warn('Ignoring sync with invalid descriptor', docSelector);
     return;
@@ -1012,6 +1043,9 @@ function ensureReplica(descriptor) {
     if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
       throw new Error('Automerge not ready');
     }
+    if (!AutomergeLib || typeof AutomergeLib.from !== 'function') {
+      throw new Error('Automerge not ready');
+    }
     let doc;
     switch (descriptor.kind) {
       case 'registry':
@@ -1119,6 +1153,24 @@ function parseServerDescriptor(docSelector) {
   if (docSelector && typeof docSelector === 'object' && typeof docSelector.listId === 'string') {
     return { kind: 'list', listId: docSelector.listId };
   }
+  return null;
+}
+
+async function parseSocketMessage(data) {
+  if (typeof data === 'string') {
+    return JSON.parse(data);
+  }
+  if (data instanceof Blob) {
+    return JSON.parse(await data.text());
+  }
+  if (data instanceof ArrayBuffer) {
+    return JSON.parse(arrayBufferToString(data));
+  }
+  return JSON.parse(String(data));
+}
+
+function arrayBufferToString(buffer) {
+  return new TextDecoder().decode(new Uint8Array(buffer));
   return null;
 }
 

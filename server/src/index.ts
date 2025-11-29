@@ -2,6 +2,8 @@ import http from 'node:http';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createWSServer } from './ws.js';
 import { info, error } from './logger.js';
 import * as Automerge from '@automerge/automerge';
@@ -34,6 +36,16 @@ async function main() {
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
   });
+
+  app.use(
+    express.static(WEB_ROOT, {
+      setHeaders(res, servedPath) {
+        if (servedPath.endsWith('.wasm')) {
+          res.type('application/wasm');
+        }
+      }
+    })
+  );
 
   app.use(
     express.static(WEB_ROOT, {
