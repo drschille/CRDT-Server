@@ -6,6 +6,7 @@ import {
   ListId,
   ListRegistryDoc,
   ListRegistryEntry,
+  ListItem,
   ShoppingListDoc,
   UserId,
   Visibility
@@ -141,7 +142,7 @@ export function addItem(
   }
 
   return Automerge.change(doc, 'add_item', (draft) => {
-    const item = {
+    const item: ListItem = {
       id: randomUUID(),
       label: toText(label),
       createdAt: new Date().toISOString(),

@@ -358,6 +358,7 @@ function connectWithCredentials(creds) {
   }
 
   socket = new WebSocket(connectUrl);
+  socket.binaryType = 'arraybuffer';
 
   socket.addEventListener('open', () => {
     setConnectedState(true);
@@ -366,11 +367,12 @@ function connectWithCredentials(creds) {
     showMessage('Connected');
   });
 
-  socket.addEventListener('message', (event) => {
+  socket.addEventListener('message', async (event) => {
     try {
-      handleMessage(JSON.parse(event.data));
+      const payload = await parseSocketMessage(event.data);
+      handleMessage(payload);
     } catch (error) {
-      console.error('Failed to handle message', error);
+      console.error('Failed to handle message', error, event.data);
       showMessage('Received malformed message from server', true);
     }
   });
@@ -1069,6 +1071,23 @@ function parseServerDescriptor(docSelector) {
     return { kind: 'list', listId: docSelector.listId };
   }
   throw new Error('Unknown document selector');
+}
+
+async function parseSocketMessage(data) {
+  if (typeof data === 'string') {
+    return JSON.parse(data);
+  }
+  if (data instanceof Blob) {
+    return JSON.parse(await data.text());
+  }
+  if (data instanceof ArrayBuffer) {
+    return JSON.parse(arrayBufferToString(data));
+  }
+  return JSON.parse(String(data));
+}
+
+function arrayBufferToString(buffer) {
+  return new TextDecoder().decode(new Uint8Array(buffer));
 }
 
 function scheduleDebouncedItemAction(listId, key, build) {
