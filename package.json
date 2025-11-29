@@ -10,7 +10,8 @@
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write .",
     "test": "vitest",
-    "copy:automerge": "node scripts/copy-automerge.mjs"
+    "copy:automerge": "node scripts/copy-automerge.mjs",
+    "postinstall": "pnpm run copy:automerge"
   },
   "keywords": [],
   "license": "MIT",
